@@ -1,187 +1,205 @@
 ![FAIV Screenshot](faiv.png)
 
-# FAIV – Multi-Pillar Council Setup
+# FAIV — Five-Pillar AI Council Framework
 
-This project demonstrates a multi-perspective AI “council” using OpenAI’s GPT-4 for responses. It combines a React retro-styled console front end with a FastAPI backend, wrapped in a Flask WSGI container for hosting flexibility when deployed in production.
+FAIV is a decision-intelligence framework that routes user queries through a council of 25 AI personas organized into five philosophical pillars. Rather than returning a single AI opinion, FAIV simulates a genuine multi-perspective debate — each council member argues from their unique worldview, challenges each other directly, and produces a synthesized consensus grounded in the actual deliberation.
+
+**Live:** [https://faiv.ai](https://faiv.ai)
 
 ---
 
-## 1. Overview
+## How It Works
+
+### The Five Pillars
+
+| Pillar | Focus | Example Members |
+|--------|-------|-----------------|
+| **Wisdom** | Philosophy, ethics, historical precedent | Kyre (Skeptical Philosopher), Solyn (Ethical Historian) |
+| **Strategy** | Tactical planning, risk assessment, game theory | Iom (Strategic Tactician), Neris (Economic Strategist) |
+| **Expansion** | Growth, creativity, unconventional thinking | Zyra (Disruptive Innovator), Kael (Visionary Architect) |
+| **Future** | Emerging trends, long-term impact, technology | Aen (Futurist Technologist), Torin (Speculative Theorist) |
+| **Integrity** | Moral grounding, accountability, fairness | Cery (Moral Compass), Elyn (Justice Advocate) |
+
+Each pillar contains 5 members (25 total), defined in the **Identity Codex** (`faiv_app/identity_codex.py`). Every member has 16 identity fields including principles, faith, vices, social dynamics, alliances, and conflicts — creating deeply distinct personas.
+
+### The Deliberation Process
+
+1. **Member Selection** — For each query, 1 random representative is chosen from each pillar (5 total for FAIV mode), or 1 from a single pillar if queried directly.
+2. **Full Character Injection** — All 16 identity fields per member are injected into the system prompt so the model deeply embodies each character.
+3. **Authentic Debate** — Members must give concrete, specific answers, directly challenge each other by name, and reference their principles. No abstract philosophizing.
+4. **Consensus Synthesis** — The final consensus reflects what was actually debated, including confidence score, justification, and any dissenting opinions.
+
+### Interactive Re-Deliberation
+
+Users can engage directly with the council:
+- Each speaker's statement appears as a **clickable tile**
+- Click a tile to expand a reply field — agree, disagree, or redirect
+- Submitting a reply triggers a **re-deliberation** where the same council members reconvene and incorporate the user's input
+- Replied-to tiles show a "replied" badge that links to the user's reply, and the reply links back to the tile
+
+---
+
+## Architecture
+
+```
+faiv/
+├── faiv_app/                    # Backend (Python/FastAPI)
+│   ├── core.py                  # API server, deliberation engine, prompt construction
+│   ├── identity_codex.py        # 25-member Identity Codex (5 pillars x 5 members)
+│   ├── utils.py                 # Utility functions
+│   └── __init__.py
+├── faiv-console/                # Frontend (React)
+│   ├── src/
+│   │   └── components/
+│   │       ├── FAIVConsole.js   # Main UI component
+│   │       └── FAIVConsole.css  # Retro terminal styling
+│   ├── public/
+│   │   ├── favicon.svg          # Green V favicon
+│   │   ├── index.html
+│   │   └── manifest.json
+│   └── package.json
+├── passenger_wsgi.py            # cPanel/Passenger WSGI entry point
+├── requirements.txt             # Python dependencies
+├── .env                         # OpenAI API key (not committed)
+└── .gitignore
+```
+
+### API Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/health` | Health check — returns API status, Redis status, model info |
+| `POST` | `/query/` | Submit a query for council deliberation |
+| `POST` | `/redeliberate/` | Re-deliberate with user interjection (same council reconvenes) |
+| `POST` | `/reset/` | Reset a session's conversation history |
+
+### Tech Stack
+
+- **Backend:** FastAPI, OpenAI GPT-4o, Redis (optional, with in-memory fallback), Pydantic
+- **Frontend:** React 19, vanilla CSS (retro terminal aesthetic)
+- **Hosting:** cPanel with Phusion Passenger (ASGI-to-WSGI via `a2wsgi`)
+- **Sessions:** Redis or in-memory — conversation history persists across queries within a session
+
+---
+
+## Local Development
+
+### Prerequisites
+
+- Python 3.10+
+- Node.js 18+
+- An [OpenAI API key](https://platform.openai.com/api-keys)
 
 ### Backend
-- Located in `faiv_app/core.py`, featuring a FastAPI application.
-- In production (e.g., with Passenger), we expose a Flask wrapper (WSGIMiddleware) as "application".
-- Uses Redis for session-based memory and GPT-4 for AI responses.
+
+```sh
+cd faiv
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+```
+
+Create a `.env` file in the project root:
+```
+OPENAI_API_KEY=sk-proj-your-key-here
+```
+
+Start the API server:
+```sh
+uvicorn faiv_app.core:fastapi_app --host 127.0.0.1 --port 8000 --reload
+```
+
+Verify: `curl http://127.0.0.1:8000/health`
 
 ### Frontend
-- A React application in `faiv-console/`, styled as a classic console interface.
-- Dynamically queries the backend at `http://127.0.0.1:8000/query/`.
 
-### Environment
-- Requires `OPENAI_API_KEY` in the environment.
-- Optionally configure Redis host/port in `core.py` if needed.
+```sh
+cd faiv-console
+npm install
+npm start
+```
+
+Opens at `http://localhost:3000`. The frontend calls `http://127.0.0.1:8000` by default (configured via `REACT_APP_API_BASE_URL`).
 
 ---
 
-## 2. Folder Structure
+## Production Deployment (cPanel)
 
-```
-FAIV/
-├── README.md                  (This file)
-├── requirements.txt           (Python dependencies)
-├── faiv_app/                  (Backend code)
-│   ├── core.py                (FastAPI + Flask wrapper)
-│   ├── identity_codex.py      (Identity Codex data)
-│   └── ...
-└── faiv-console/              (Frontend React code)
-    ├── package.json
-    ├── src/
-    ├── public/
-    └── build/                 (Generated by "npm run build")
-```
+### Backend
 
----
-
-## 3. Backend Setup
-
-### Local Development
-
-1. **Create & Activate Virtual Env**
-   ```sh
-   cd FAIV
-   python3 -m venv venv
-   source venv/bin/activate
-   ```
-
-2. **Install Dependencies**
+1. Upload the project to the server (e.g., `/home/user/api/`)
+2. Create a Python app in cPanel pointing to the project root
+3. Install dependencies in the virtualenv:
    ```sh
    pip install -r requirements.txt
+   pip install a2wsgi python-dotenv
    ```
+4. Create `.env` with your OpenAI key
+5. The `passenger_wsgi.py` bridges FastAPI (ASGI) to Passenger (WSGI) via `a2wsgi`
+6. Update CORS origins in `core.py` to include your production domain
+7. Restart Passenger: `touch tmp/restart.txt`
 
-3. **Set Your API Key**
-   ```sh
-   export OPENAI_API_KEY="sk-YourOpenAIKey"
-   ```
+### Frontend
 
-4. **Launch the FastAPI Server**
-   ```sh
-   uvicorn faiv_app.core:fastapi_app --host 127.0.0.1 --port 8000 --reload
-   ```
-   (Runs at `http://127.0.0.1:8000`)
+Build with the production API URL:
+```sh
+cd faiv-console
+REACT_APP_API_BASE_URL=https://api.yourdomain.com npm run build
+```
 
-### Production Deployment with Passenger
-
-- Passenger can load the WSGI app from `faiv_app/core.py`:
-  ```python
-  from faiv_app.core import application
-  ```
-- Ensure `OPENAI_API_KEY` is set in the production environment.
-- The Flask wrapper is already configured in `core.py`, no extra config needed.
+Deploy the `build/` contents to your web document root. Add an `.htaccess` for client-side routing:
+```apache
+RewriteEngine On
+RewriteBase /
+RewriteRule ^index\.html$ - [L]
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteRule . /index.html [L]
+```
 
 ---
 
-## 4. Frontend Setup
+## The Identity Codex
 
-### Development Mode
+Each of the 25 council members is defined by 16 fields:
 
-1. **Install Node Dependencies**
-   ```sh
-   cd faiv-console
-   npm install
-   ```
+| Field | Purpose |
+|-------|---------|
+| `claimed-title` | Their self-identified role (e.g., "The Skeptical Philosopher") |
+| `role` | Professional archetype |
+| `principles` | Core beliefs that drive their reasoning |
+| `aligns_with` | Members they naturally agree with |
+| `conflicts_with` | Members they naturally challenge |
+| `contribution` | What they uniquely bring to deliberation |
+| `faith` | Spiritual/philosophical worldview |
+| `fight-for` | The cause they champion above all |
+| `social-level` | Introvert/extrovert scale (1-10) |
+| `favorite-activity` | What energizes them |
+| `finality` | Their view on permanence and endings |
+| `chosen-memory` | A defining personal memory |
+| `vice-of-choice` | Their human indulgence |
+| `one-piece-of-wisdom` | Their signature insight |
+| `real-world-analogy` | A real-world figure they resemble |
+| `example-influence` | How they'd respond in a sample scenario |
 
-2. **Run the React Dev Server**
-   ```sh
-   npm start
-   ```
-   (Runs at `http://localhost:3000`, calls backend at `http://127.0.0.1:8000/query/`)
-
-### Production Build
-
-1. **Build the React App**
-   ```sh
-   cd faiv-console
-   npm run build
-   ```
-
-2. **Deploy the `build/` Folder**
-   These are your static files for production hosting.
+These fields are injected into the system prompt so that GPT-4o can embody each character with depth and consistency.
 
 ---
 
-## 5. Identity Codex & Dynamic Pillars
+## Design Philosophy
 
-- `identity_codex.py` defines multiple “council members” grouped by pillars (Wisdom, Strategy, Expansion, Future, Integrity, plus default FAIV).
-- The user can select which pillar to query from the React front end.
-- `core.py` automatically includes only the relevant codex members in the AI’s prompt.
+FAIV is built on the premise that better decisions emerge from structured disagreement. Rather than a single AI voice optimizing for agreeableness, FAIV creates productive tension between five philosophical orientations:
 
----
+- **Wisdom** grounds decisions in historical precedent and ethical reflection
+- **Strategy** pressure-tests feasibility and risk
+- **Expansion** pushes boundaries and challenges assumptions
+- **Future** considers long-term trajectories and emerging patterns
+- **Integrity** holds the process accountable to fairness and moral standards
 
-## 6. Example Screenshots
-
-(Reference: place `faiv-ss.png` and `faiv-ss2.png` in the same directory for these examples.)
-
-- Original Screenshot (`faiv-ss.png`)
-- Updated Multi-Pillar Screenshot (`faiv-ss2.png`)
-
-With multi-pillar, you’ll see lines like:
-“Wisdom Council’s Consensus:” or “Future Council’s Consensus:” etc.
+The result is a consensus that has been stress-tested from multiple angles — not just an answer, but an answer that has survived genuine debate.
 
 ---
 
-## 7. Troubleshooting
+## License
 
-- **Missing `OPENAI_API_KEY`:**
-  Make sure to set `export OPENAI_API_KEY="sk-YourKey"`
-
-- **Redis Connection Issues:**
-  Adjust host/port in `redis_client = redis.Redis(...)` in `core.py` if needed.
-
-- **React Dev Server Not Finding API:**
-  Confirm `uvicorn` is running on 8000. If needed, modify fetch calls in your React code.
-
-- **Passenger Doesn’t Recognize WSGI:**
-  Check `passenger_wsgi.py` contains:
-  ```python
-  from faiv_app.core import application
-  ```
-  Then restart Passenger.
-
----
-
-## 8. Additional Notes
-
-### Local Testing
-
-### Production
-Deploy via Passenger or any WSGI-compatible server. The “application” is the Flask-wrapped app in `core.py`.
-
-### Frontend Updates
-If you change the React code, run `npm run build` again to regenerate `build/`.
-
----
-
-## 9. Git Workflow
-
-If you want to push a new branch with your updated React build:
-
-1. **Build Updated React**
-   ```sh
-   cd faiv-console
-   npm run build
-   ```
-
-2. **Commit & Push**
-   ```sh
-   git checkout -b feature/pillar-dynamic
-   git add .
-   git commit -m "Add multi-pillar logic & updated console UI"
-   git push -u origin feature/pillar-dynamic
-   ```
-
----
-
-**Enjoy the new multi-pillar FAIV council!**
-
----
-
+MIT

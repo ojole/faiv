@@ -1,5 +1,11 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import "./FAIVConsole.css";
+
+/****************************************
+ * 0) API Base URL (configurable via env)
+ ****************************************/
+const API_BASE =
+  process.env.REACT_APP_API_BASE_URL || "http://127.0.0.1:8000";
 
 /****************************************
  * 1) ASCII Loader Frames
@@ -63,7 +69,7 @@ const asciiVFrames = [
  ****************************************/
 function extractFinalOutput(response) {
   if (!response || typeof response !== "string") {
-    return "⚠ No valid response received.";
+    return "No valid response received.";
   }
 
   // 1) Clean up zero-width etc.
@@ -164,7 +170,166 @@ function extractFinalOutput(response) {
 }
 
 /****************************************
- * 3) Main Component
+ * 3) Summarize user input for chat title
+ ****************************************/
+function summarizeInput(text) {
+  // Strip trailing punctuation
+  let s = text.replace(/[?.!,;:]+$/g, "").trim();
+  // Remove leading filler words (question starters, articles, etc.)
+  const fillerPattern = /^(what|which|where|when|who|how|why|can|could|would|should|do|does|is|are|was|were|tell|me|about|give|please|i\s+want\s+to\s+know|i\s+need|i\s+want|the|a|an|some|any|be\s+considered|considered|regarded\s+as|thought\s+of\s+as|known\s+as|i)\s+/i;
+  let prev = "";
+  while (s !== prev) {
+    prev = s;
+    s = s.replace(fillerPattern, "").trim();
+  }
+  // Lowercase the result
+  s = s.toLowerCase();
+  // Cap at 40 chars on a word boundary
+  if (s.length > 40) {
+    s = s.slice(0, 40).replace(/\s+\S*$/, "").trim();
+  }
+  // Fallback if we stripped everything
+  if (!s) {
+    s = text.slice(0, 30).trim().toLowerCase();
+  }
+  return `"${s}"`;
+}
+
+/****************************************
+ * 4) Parse deliberation into speaker entries
+ ****************************************/
+function parseDeliberation(delibText) {
+  if (!delibText) return [];
+  const lines = delibText.split("\n");
+  const entries = [];
+  const speakerRegex = /^<?(\w+)>?\s*\(([^)]+)\)\s*:\s*(.+)/;
+  let currentEntry = null;
+
+  for (const line of lines) {
+    const match = line.match(speakerRegex);
+    if (match) {
+      if (currentEntry) entries.push(currentEntry);
+      currentEntry = {
+        member: match[1],
+        pillar: match[2].trim(),
+        text: match[3].trim(),
+      };
+    } else if (currentEntry && line.trim()) {
+      currentEntry.text += " " + line.trim();
+    }
+  }
+  if (currentEntry) entries.push(currentEntry);
+  return entries;
+}
+
+/****************************************
+ * 5) Deliberation Tile (single speaker)
+ ****************************************/
+function DeliberationTile({ entry, index, onSubmitComment, isSubmitting, replyMsgIdx, onJumpToReply, tileId }) {
+  const [expanded, setExpanded] = React.useState(false);
+  const [comment, setComment] = React.useState("");
+
+  function handleToggle() {
+    setExpanded((prev) => !prev);
+  }
+
+  function handleSubmit(e) {
+    e.preventDefault();
+    if (!comment.trim()) return;
+    onSubmitComment(entry, index, comment);
+    setComment("");
+    setExpanded(false);
+  }
+
+  return (
+    <div className="deliberation-tile" id={tileId} onClick={handleToggle}>
+      <div className="tile-header">
+        <span className="tile-member">{entry.member}</span>
+        <span className="tile-pillar">({entry.pillar})</span>
+        {replyMsgIdx !== undefined && (
+          <span
+            className="tile-reply-badge"
+            title="Jump to your reply"
+            onClick={(e) => {
+              e.stopPropagation();
+              onJumpToReply(replyMsgIdx);
+            }}
+          >
+            replied
+          </span>
+        )}
+      </div>
+      <div className="tile-text">{entry.text}</div>
+      {expanded && (
+        <form className="tile-comment-form" onClick={(e) => e.stopPropagation()} onSubmit={handleSubmit}>
+          <input
+            className="tile-comment-input"
+            value={comment}
+            onChange={(e) => setComment(e.target.value)}
+            placeholder="Agree or disagree..."
+            autoFocus
+          />
+          <button
+            type="submit"
+            className="tile-comment-submit"
+            disabled={isSubmitting}
+          >
+            {isSubmitting ? "..." : "Reply"}
+          </button>
+        </form>
+      )}
+    </div>
+  );
+}
+
+/****************************************
+ * 6) Deliberation Panel (all tiles)
+ ****************************************/
+function DeliberationPanel({ delibText, onSubmitComment, isSubmitting, repliedTiles, delibKey, onJumpToReply }) {
+  const entries = parseDeliberation(delibText);
+
+  if (entries.length === 0) {
+    return <pre className="deliberation-pre">{delibText || "Deliberation unavailable."}</pre>;
+  }
+
+  return (
+    <div className="deliberation-tiles-container">
+      {entries.map((entry, idx) => {
+        const tileKey = `${delibKey}-${idx}`;
+        // Skip tiles that have been replied to — they're rendered outside the drawer
+        if (repliedTiles?.[tileKey] !== undefined) return null;
+        return (
+          <DeliberationTile
+            key={idx}
+            entry={entry}
+            index={idx}
+            tileId={`tile-${tileKey}`}
+            onSubmitComment={onSubmitComment}
+            isSubmitting={isSubmitting}
+            onJumpToReply={onJumpToReply}
+          />
+        );
+      })}
+    </div>
+  );
+}
+
+/* Helper: extract replied-to tiles from a deliberation for rendering outside the drawer */
+function getRepliedTileEntries(delibText, delibKey, repliedTiles) {
+  if (!delibText || !repliedTiles) return [];
+  const entries = parseDeliberation(delibText);
+  const result = [];
+  entries.forEach((entry, idx) => {
+    const tileKey = `${delibKey}-${idx}`;
+    if (repliedTiles[tileKey] !== undefined) {
+      result.push({ entry, idx, tileKey, replyMsgIdx: repliedTiles[tileKey] });
+    }
+  });
+  return result;
+}
+
+/****************************************
+ * 7) Main Component
  ****************************************/
 export default function FAIVConsole() {
   // All sessions + selected session ID
@@ -179,7 +344,6 @@ export default function FAIVConsole() {
   const [asciiFrame, setAsciiFrame] = useState(0);
   const [progress, setProgress] = useState(0);
 
-  // THIS WAS MISSING:
   const [useVLogo, setUseVLogo] = useState(false);
 
   // Pillar dropdown
@@ -191,17 +355,46 @@ export default function FAIVConsole() {
   const [pendingDeleteSession, setPendingDeleteSession] = useState("");
   const [deleteConfirmInput, setDeleteConfirmInput] = useState("");
 
-  // Account dropdown
-  const [accountOpen, setAccountOpen] = useState(false);
+  // API health status
+  const [apiStatus, setApiStatus] = useState("checking"); // "ok" | "down" | "checking"
 
-  // Which page is selected in the account menu (default = "Counsole")
-  const [selectedPage, setSelectedPage] = useState("Counsole");
+  // Store deliberation text per message index
+  const [deliberations, setDeliberations] = useState({});
 
-  // 1) Switch the page + close account menu
-  function handleSelectPage(pageName) {
-    setSelectedPage(pageName);
-    setAccountOpen(false);
+  // Re-deliberation loading state
+  const [redeliberating, setRedeliberating] = useState(false);
+
+  // Track which tiles have replies: { "delibKey-entryIdx": replyMsgIdx }
+  const [repliedTiles, setRepliedTiles] = useState({});
+
+  // Error details (for expandable display)
+  const [lastError, setLastError] = useState(null);
+
+  const consoleBodyRef = useRef(null);
+
+  function scrollToElement(id) {
+    const el = document.getElementById(id);
+    if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
   }
+
+  // Health check on mount + periodic
+  useEffect(() => {
+    async function checkHealth() {
+      try {
+        const resp = await fetch(`${API_BASE}/health`);
+        if (resp.ok) {
+          setApiStatus("ok");
+        } else {
+          setApiStatus("down");
+        }
+      } catch {
+        setApiStatus("down");
+      }
+    }
+    checkHealth();
+    const interval = setInterval(checkHealth, 30000);
+    return () => clearInterval(interval);
+  }, []);
 
   // 2) On mount => load existing sessions from localStorage
   useEffect(() => {
@@ -214,7 +407,6 @@ export default function FAIVConsole() {
       if (lastActive && parsed[lastActive]) {
         setActiveSessionId(lastActive);
       } else {
-        // fallback
         const keys = Object.keys(parsed);
         if (keys.length > 0) {
           setActiveSessionId(keys[0]);
@@ -224,7 +416,6 @@ export default function FAIVConsole() {
         }
       }
     } else {
-      // No sessions => create a new one
       handleNewChat();
     }
   }, []);
@@ -261,12 +452,11 @@ export default function FAIVConsole() {
       }, 400);
     } else {
       setAsciiFrame(0);
-      setUseVLogo((prev) => !prev); // Alternates logos after loading each time
+      setUseVLogo((prev) => !prev);
     }
     return () => clearInterval(interval);
   }, [loading, useVLogo]);
-    
-    
+
   // 6) Helpers
   const currentSession = allSessions[activeSessionId];
   const currentMessages = currentSession ? currentSession.messages : [];
@@ -337,7 +527,6 @@ export default function FAIVConsole() {
     ensureAtLeastOneSession();
     if (!input.trim() || !activeSessionId) return;
 
-    // Make sure session actually exists
     if (!allSessions[activeSessionId]) {
       handleNewChat();
       return;
@@ -346,27 +535,25 @@ export default function FAIVConsole() {
     const title = allSessions[activeSessionId].title;
     let updated = [...allSessions[activeSessionId].messages];
 
-    // Insert a separator if there's existing content
     if (updated.length > 0) updated.push("-----");
     updated.push(`> ${input}`);
 
-    // If "Untitled," rename
     if (title === "Untitled") {
-      let snippet = input.length > 30 ? input.slice(0, 30).trim() + "..." : input;
-      snippet = `"${snippet}"`;
+      let snippet = summarizeInput(input);
       setAllSessions((prev) => ({
         ...prev,
         [activeSessionId]: { ...prev[activeSessionId], title: snippet },
       }));
     }
 
-    // Save
+    const capturedInput = input;
     updateSessionMessages(activeSessionId, updated);
     setInput("");
     setLoading(true);
+    setLastError(null);
 
     try {
-      const resp = await fetch("http://127.0.0.1:8000/query/", {
+      const resp = await fetch(`${API_BASE}/query/`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -374,29 +561,157 @@ export default function FAIVConsole() {
         },
         body: JSON.stringify({
           session_id: activeSessionId,
-          input_text: input,
+          input_text: capturedInput,
           pillar: selectedPillar,
         }),
       });
       if (!resp.ok) {
-        throw new Error(`HTTP error! status: ${resp.status}`);
+        const errorBody = await resp.text();
+        throw new Error(`HTTP ${resp.status}: ${errorBody}`);
       }
       const data = await resp.json();
 
       updated.push(data.response);
       updateSessionMessages(activeSessionId, updated);
+
+      // Store deliberation with metadata for re-deliberation
+      if (data.deliberation) {
+        const msgIdx = updated.length - 1;
+        setDeliberations((prev) => ({
+          ...prev,
+          [`${activeSessionId}-${msgIdx}`]: {
+            deliberation: data.deliberation,
+            originalInput: capturedInput,
+            council: data.council || {},
+          },
+        }));
+      }
+
+      // Refresh health status on success
+      setApiStatus("ok");
     } catch (err) {
-      updated.push(`⚠ Error contacting FAIV API: ${err.message}`);
+      const isNetworkError = err.message === "Failed to fetch";
+      const displayMsg = isNetworkError
+        ? "Cannot reach FAIV API. Is the backend running?"
+        : `API error: ${err.message}`;
+      updated.push(`[ERROR] ${displayMsg}`);
       updateSessionMessages(activeSessionId, updated);
+      setLastError(err.message);
+      if (isNetworkError) setApiStatus("down");
     } finally {
       setLoading(false);
     }
 
-    // Scroll
     setTimeout(() => {
-      const consoleBody = document.querySelector(".right-console-body");
-      if (consoleBody) consoleBody.scrollTop = consoleBody.scrollHeight;
+      if (consoleBodyRef.current) {
+        consoleBodyRef.current.scrollTop = consoleBodyRef.current.scrollHeight;
+      }
     }, 100);
+  }
+
+  async function handleRedeliberate(entry, entryIndex, comment, msgIdx) {
+    const delibKey = `${activeSessionId}-${msgIdx}`;
+    const delibData = deliberations[delibKey];
+    if (!delibData) return;
+
+    const delibText = typeof delibData === "string" ? delibData : delibData.deliberation;
+    const originalInput = typeof delibData === "string" ? "" : delibData.originalInput;
+    const councilNames = typeof delibData === "string" ? [] : Object.keys(delibData.council || {});
+
+    // Reconstruct deliberation up to and including the clicked tile
+    const entries = parseDeliberation(delibText);
+    const entriesUpTo = entries.slice(0, entryIndex + 1);
+    const deliberationUpTo = entriesUpTo
+      .map((e) => `${e.member} (${e.pillar}): ${e.text}`)
+      .join("\n");
+
+    setRedeliberating(true);
+    setLoading(true);
+    setLastError(null);
+
+    let updated = [...(allSessions[activeSessionId]?.messages || [])];
+    updated.push("-----");
+    const replyMsg = `└ [Reply to ${entry.member}]: ${comment}`;
+    updated.push(replyMsg);
+    const replyMsgIdx = updated.length - 1;
+    updateSessionMessages(activeSessionId, updated);
+
+    // Track the tile-to-reply link
+    const tileKey = `${activeSessionId}-${msgIdx}-${entryIndex}`;
+    setRepliedTiles((prev) => ({ ...prev, [tileKey]: replyMsgIdx }));
+
+    try {
+      const resp = await fetch(`${API_BASE}/redeliberate/`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify({
+          session_id: activeSessionId,
+          original_input: originalInput,
+          deliberation_up_to: deliberationUpTo,
+          user_comment: comment,
+          target_member: entry.member,
+          pillar: selectedPillar,
+          council_members: councilNames,
+        }),
+      });
+      if (!resp.ok) {
+        const errorBody = await resp.text();
+        throw new Error(`HTTP ${resp.status}: ${errorBody}`);
+      }
+      const data = await resp.json();
+
+      updated.push(data.response);
+      updateSessionMessages(activeSessionId, updated);
+
+      if (data.deliberation) {
+        const newMsgIdx = updated.length - 1;
+        setDeliberations((prev) => ({
+          ...prev,
+          [`${activeSessionId}-${newMsgIdx}`]: {
+            deliberation: data.deliberation,
+            originalInput: originalInput,
+            council: data.council || {},
+          },
+        }));
+      }
+      setApiStatus("ok");
+    } catch (err) {
+      const isNetworkError = err.message === "Failed to fetch";
+      const displayMsg = isNetworkError
+        ? "Cannot reach FAIV API."
+        : `API error: ${err.message}`;
+      updated.push(`[ERROR] ${displayMsg}`);
+      updateSessionMessages(activeSessionId, updated);
+      setLastError(err.message);
+      if (isNetworkError) setApiStatus("down");
+    } finally {
+      setLoading(false);
+      setRedeliberating(false);
+    }
+
+    setTimeout(() => {
+      if (consoleBodyRef.current) {
+        consoleBodyRef.current.scrollTop = consoleBodyRef.current.scrollHeight;
+      }
+    }, 100);
+  }
+
+  async function handleResetSession() {
+    if (!activeSessionId) return;
+    try {
+      await fetch(`${API_BASE}/reset/?session_id=${encodeURIComponent(activeSessionId)}`, {
+        method: "POST",
+      });
+    } catch {
+      // Backend reset is best-effort; clear locally regardless
+    }
+    // Clear local session messages
+    setAllSessions((prev) => ({
+      ...prev,
+      [activeSessionId]: { ...prev[activeSessionId], messages: [], title: "Untitled" },
+    }));
+    setDeliberations({});
+    setLastError(null);
   }
 
   /****************************************
@@ -450,139 +765,193 @@ export default function FAIVConsole() {
         {/* RIGHT WINDOW */}
         <div className="retro-window right-window">
           <div className="retro-title-bar right-title-bar">
-            {/* Pillar dropdown only if on Counsole */}
-            {selectedPage === "Counsole" && (
-              <>
-                <div
-                  className="pillar-dropdown-wrapper"
-                  onClick={() => setPillarOpen(!pillarOpen)}
-                >
-                  <div className="pillar-dropdown-display">{selectedPillar}</div>
-                  <div className="pillar-arrow">{pillarOpen ? "▲" : "▼"}</div>
-                </div>
-
-                <ul className={`pillar-menu ${pillarOpen ? "open" : ""}`}>
-                  {["FAIV","Wisdom","Strategy","Expansion","Future","Integrity"].map(opt => (
-                    <li
-                      key={opt}
-                      className={opt === selectedPillar ? "selected" : ""}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setSelectedPillar(opt);
-                        setPillarOpen(false);
-                      }}
-                    >
-                      {opt}
-                    </li>
-                  ))}
-                </ul>
-              </>
-            )}
-
-            {/* Page title => left or center style */}
+            {/* Pillar dropdown */}
             <div
-              style={
-                selectedPage === "Counsole"
-                  ? { marginLeft: "10px", marginRight: "auto" }
-                  : { marginLeft: "8px" }
-              }
+              className="pillar-dropdown-wrapper"
+              onClick={() => setPillarOpen(!pillarOpen)}
             >
-              <span className="page-title">{selectedPage}</span>
+              <div className="pillar-dropdown-display">{selectedPillar}</div>
+              <div className="pillar-arrow">{pillarOpen ? "\u25B2" : "\u25BC"}</div>
             </div>
 
-            {/* Account dropdown on far right */}
-            <div
-              className="account-dropdown-wrapper"
-              onClick={() => setAccountOpen(!accountOpen)}
-              style={{ marginLeft: "auto" }}
-            >
-              <div className="account-icon">&#x1F310;&#xFE0E;</div>
-              <div className="account-arrow">{accountOpen ? "▲" : "▼"}</div>
-            </div>
-
-            <ul className={`account-menu ${accountOpen ? "open" : ""}`}>
-              <li className="account-username">@User</li>
-
-              {/* Show pages, highlight if selected */}
-              {[
-                "Counsole",
-                "Profile",
-                "Civilization",
-                "Friends",
-                "Messages",
-                "Posts",
-                "Replies",
-                "Settings",
-                "Logout",
-              ].map((page) => (
+            <ul className={`pillar-menu ${pillarOpen ? "open" : ""}`}>
+              {["FAIV","Wisdom","Strategy","Expansion","Future","Integrity"].map(opt => (
                 <li
-                  key={page}
-                  onClick={() => handleSelectPage(page)}
-                  className={page === selectedPage ? "selected" : ""}
+                  key={opt}
+                  className={opt === selectedPillar ? "selected" : ""}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setSelectedPillar(opt);
+                    setPillarOpen(false);
+                  }}
                 >
-                  {page}
+                  {opt}
                 </li>
               ))}
             </ul>
+
+            {/* Page title + reset */}
+            <div style={{ marginLeft: "10px", marginRight: "auto", display: "flex", alignItems: "center" }}>
+              <span className="page-title">Counsole</span>
+              <button
+                className="reset-btn"
+                onClick={handleResetSession}
+                title="Reset current session"
+              >
+                Reset
+              </button>
+            </div>
+
+            {/* API status indicator */}
+            <div className="api-status-wrapper" title={`API: ${apiStatus}`}>
+              <span
+                className={`api-status-dot ${apiStatus === "ok" ? "status-ok" : apiStatus === "down" ? "status-down" : "status-checking"}`}
+              />
+            </div>
           </div>
 
           {/* The main console area + loader */}
-          <div className={`right-console-body ${loading ? "loading" : ""}`}>
-          {loading ? (
-          <div className="ascii-loader">
-            {(useVLogo ? asciiVFrames : asciiFAIVFrames)[asciiFrame].map((line, i) => (
-              <pre key={i} className="ascii-logo">
-                {line}
-              </pre>
-            ))}
-            <div className="progress-bar">
-              {"["}
-              {"█".repeat(Math.round(progress / 10))}
-              {"▒".repeat(10 - Math.round(progress / 10))}
-              {"]"}
-            </div>
-          </div>
-        ) : (
-          <div className="console-output">
-            {currentMessages.map((msg, idx) => {
-              if (msg === "-----") {
-                return <div key={idx} className="separator-line" />;
-              }
-              if (
-                msg.includes("FAIV Consensus:") ||
-                msg.includes("Confidence Score:")
-              ) {
-                return (
-                  <div key={idx} className="console-line">
-                    {extractFinalOutput(msg)}
-                  </div>
-                );
-              }
-              return (
-                <div key={idx} className="console-line">
-                  {msg}
+          <div
+            className={`right-console-body ${loading ? "loading" : ""}`}
+            ref={consoleBodyRef}
+          >
+            {loading ? (
+              <div className="ascii-loader">
+                {(useVLogo ? asciiVFrames : asciiFAIVFrames)[asciiFrame].map((line, i) => (
+                  <pre key={i} className="ascii-logo">
+                    {line}
+                  </pre>
+                ))}
+                <div className="progress-bar">
+                  {"["}
+                  {"\u2588".repeat(Math.round(progress / 10))}
+                  {"\u2592".repeat(10 - Math.round(progress / 10))}
+                  {"]"}
                 </div>
-              );
-            })}
+              </div>
+            ) : (
+              <div className="console-output">
+                {currentMessages.map((msg, idx) => {
+                  if (msg === "-----") {
+                    return <div key={idx} className="separator-line" />;
+                  }
 
+                  // Error messages
+                  if (typeof msg === "string" && msg.startsWith("[ERROR]")) {
+                    return (
+                      <div key={idx} className="console-line error-line">
+                        {msg.replace("[ERROR] ", "")}
+                        {lastError && (
+                          <details className="error-details">
+                            <summary>Technical details</summary>
+                            <pre>{lastError}</pre>
+                          </details>
+                        )}
+                      </div>
+                    );
+                  }
+
+                  // Consensus responses
+                  if (
+                    typeof msg === "string" &&
+                    (msg.includes("Consensus:") ||
+                     msg.includes("Confidence Score:"))
+                  ) {
+                    const delibKey = `${activeSessionId}-${idx}`;
+                    const delibData = deliberations[delibKey];
+                    const delibText = typeof delibData === "string" ? delibData : delibData?.deliberation;
+                    const repliedTileEntries = getRepliedTileEntries(delibText, delibKey, repliedTiles);
+                    return (
+                      <div key={idx} className="console-line">
+                        {extractFinalOutput(msg)}
+                        {/* Replied-to tiles shown outside the drawer — always visible */}
+                        {repliedTileEntries.length > 0 && (
+                          <div className="replied-tiles-visible">
+                            {repliedTileEntries.map(({ entry, idx: entryIdx, tileKey, replyMsgIdx }) => (
+                              <DeliberationTile
+                                key={tileKey}
+                                entry={entry}
+                                index={entryIdx}
+                                tileId={`tile-${tileKey}`}
+                                onSubmitComment={(e, eIdx, comment) =>
+                                  handleRedeliberate(e, eIdx, comment, idx)
+                                }
+                                isSubmitting={redeliberating}
+                                replyMsgIdx={replyMsgIdx}
+                                onJumpToReply={(replyIdx) => scrollToElement(`msg-${replyIdx}`)}
+                              />
+                            ))}
+                          </div>
+                        )}
+                        <details className="deliberation-details">
+                          <summary className="deliberation-summary">Deliberation</summary>
+                          <DeliberationPanel
+                            delibText={delibText}
+                            delibKey={delibKey}
+                            onSubmitComment={(entry, entryIdx, comment) =>
+                              handleRedeliberate(entry, entryIdx, comment, idx)
+                            }
+                            isSubmitting={redeliberating}
+                            repliedTiles={repliedTiles}
+                            onJumpToReply={(replyIdx) => scrollToElement(`msg-${replyIdx}`)}
+                          />
+                        </details>
+                      </div>
+                    );
+                  }
+
+                  // Reply messages: └ [Reply to MemberName]: text
+                  if (typeof msg === "string" && (msg.startsWith("└ [Reply to ") || msg.startsWith("|_ [Reply to "))) {
+                    const memberMatch = msg.match(/^(?:└|\|_) \[Reply to (\w+)\]: (.+)/);
+                    const memberName = memberMatch ? memberMatch[1] : null;
+                    // Find the tile to jump back to
+                    const sourceTileId = memberName
+                      ? Object.keys(repliedTiles).find((k) => repliedTiles[k] === idx)
+                      : null;
+                    return (
+                      <div key={idx} id={`msg-${idx}`} className="console-line reply-line">
+                        <span
+                          className="reply-prefix"
+                          title={sourceTileId ? `Jump to ${memberName}'s statement` : undefined}
+                          onClick={sourceTileId ? () => scrollToElement(`tile-${sourceTileId}`) : undefined}
+                          style={sourceTileId ? { cursor: "pointer" } : undefined}
+                        >
+                          └
+                        </span>{" "}
+                        {memberMatch ? (
+                          <>
+                            <span className="reply-member">[Reply to {memberName}]:</span>{" "}
+                            {memberMatch[2]}
+                          </>
+                        ) : (
+                          msg.slice(2)
+                        )}
+                      </div>
+                    );
+                  }
+
+                  return (
+                    <div key={idx} id={`msg-${idx}`} className="console-line">
+                      {msg}
+                    </div>
+                  );
+                })}
               </div>
             )}
           </div>
 
-          {/* If on Counsole => show input form */}
-          {selectedPage === "Counsole" && (
-            <form className="console-input" onSubmit={handleSubmit}>
-              <input
-                className="input-field"
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                placeholder="FAIV awaits your query..."
-              />
-              <button type="submit" className="submit-btn">
-                Enter
-              </button>
-            </form>
-          )}
+          {/* Input form */}
+          <form className="console-input" onSubmit={handleSubmit}>
+            <input
+              className="input-field"
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              placeholder="FAIV awaits your query..."
+            />
+            <button type="submit" className="submit-btn">
+              Enter
+            </button>
+          </form>
         </div>
       </div>
 
