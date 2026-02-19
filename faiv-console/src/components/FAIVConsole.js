@@ -370,6 +370,9 @@ export default function FAIVConsole() {
   // Error details (for expandable display)
   const [lastError, setLastError] = useState(null);
 
+  // Mobile history panel toggle
+  const [historyOpen, setHistoryOpen] = useState(false);
+
   const consoleBodyRef = useRef(null);
 
   function scrollToElement(id) {
@@ -478,6 +481,7 @@ export default function FAIVConsole() {
     setAllSessions((prev) => ({ ...prev, [newId]: newSession }));
     setActiveSessionId(newId);
     localStorage.setItem("faiv_session_id", newId);
+    setHistoryOpen(false);
   }
 
   function ensureAtLeastOneSession() {
@@ -518,6 +522,7 @@ export default function FAIVConsole() {
   function handleSelectSession(sessId) {
     setActiveSessionId(sessId);
     localStorage.setItem("faiv_session_id", sessId);
+    setHistoryOpen(false);
   }
 
   // Submit input => call server
@@ -720,8 +725,14 @@ export default function FAIVConsole() {
   return (
     <div className="outer-container">
       <div className="windows-container">
+        {/* Mobile backdrop */}
+        <div
+          className={`history-backdrop ${historyOpen ? "visible" : ""}`}
+          onClick={() => setHistoryOpen(false)}
+        />
+
         {/* LEFT WINDOW */}
-        <div className="retro-window left-window">
+        <div className={`retro-window left-window ${historyOpen ? "mobile-open" : ""}`}>
           <div className="retro-title-bar left-title-bar">
             <span>History</span>
             <button
@@ -765,6 +776,15 @@ export default function FAIVConsole() {
         {/* RIGHT WINDOW */}
         <div className="retro-window right-window">
           <div className="retro-title-bar right-title-bar">
+            {/* Mobile history toggle */}
+            <button
+              className="history-toggle-btn"
+              onClick={() => setHistoryOpen(!historyOpen)}
+              title="Toggle History"
+            >
+              {historyOpen ? "×" : "☰"}
+            </button>
+
             {/* Pillar dropdown */}
             <div
               className="pillar-dropdown-wrapper"

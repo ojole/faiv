@@ -777,3 +777,142 @@ body {
   background: #00ff00;
   box-shadow: inset -2px -2px 0 #003300, inset 2px 2px 0 #000000;
 }
+
+/* =========================================
+   17) Mobile History Toggle Button
+========================================= */
+.history-toggle-btn {
+  display: none; /* hidden on desktop */
+}
+
+/* =========================================
+   18) Mobile Responsive
+========================================= */
+@media (max-width: 768px) {
+  .outer-container {
+    padding: 0;
+  }
+
+  .windows-container {
+    position: relative;
+  }
+
+  /* History panel: absolute overlay, hidden by default */
+  .left-window {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 80%;
+    height: 100%;
+    z-index: 100;
+    transform: translateX(-100%);
+    transition: transform 0.25s ease;
+  }
+  .left-window.mobile-open {
+    transform: translateX(0);
+  }
+
+  /* Console takes full width */
+  .right-window {
+    width: 100%;
+  }
+
+  /* Show the history toggle button on mobile */
+  .history-toggle-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background-color: #00ff00;
+    color: #000;
+    font-family: "Courier New", monospace;
+    font-size: 12px;
+    font-weight: bold;
+    border: none;
+    padding: 4px 8px;
+    cursor: pointer;
+    margin-right: 6px;
+    box-shadow:
+      inset -1px -1px 0 #003300,
+      inset 1px 1px 0 #99ff99;
+    transition: transform 0.1s ease, box-shadow 0.1s ease;
+  }
+  .history-toggle-btn:active {
+    transform: translate(0, 0);
+    box-shadow:
+      inset -1px -1px 0 #99ff99,
+      inset 1px 1px 0 #003300;
+  }
+
+  /* Backdrop when history is open */
+  .history-backdrop {
+    display: none;
+    position: absolute;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.6);
+    z-index: 99;
+  }
+  .history-backdrop.visible {
+    display: block;
+  }
+
+  /* Title bar: smaller padding, smaller font */
+  .retro-title-bar {
+    font-size: 12px;
+    padding: 4px 6px;
+    height: 32px;
+  }
+
+  /* Console body: slightly smaller font on mobile */
+  .right-console-body {
+    font-size: 13px;
+    padding: 6px;
+  }
+
+  /* Input area touch friendly */
+  .console-input {
+    padding: 6px;
+  }
+  .input-field {
+    font-size: 16px; /* prevents iOS zoom on focus */
+    padding: 8px 6px;
+  }
+  .submit-btn {
+    padding: 8px 14px;
+  }
+
+  /* Chat items: larger tap targets */
+  .chat-item {
+    padding: 8px 6px;
+    font-size: 13px;
+  }
+
+  /* Pillar dropdown: smaller */
+  .pillar-dropdown-wrapper {
+    font-size: 12px;
+    padding: 3px 6px;
+  }
+  .page-title {
+    font-size: 12px;
+  }
+  .reset-btn {
+    font-size: 10px;
+    padding: 2px 4px;
+  }
+
+  /* Modal: fit mobile viewport */
+  .modal-box {
+    min-width: unset;
+    width: 85vw;
+    max-width: 320px;
+  }
+
+  /* Deliberation tiles: full width */
+  .deliberation-tiles-container {
+    max-height: 200px;
+  }
+
+  /* ASCII loader: scale down */
+  .ascii-logo {
+    font-size: 10px;
+  }
+}
