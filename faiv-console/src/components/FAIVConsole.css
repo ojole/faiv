@@ -41,14 +41,15 @@ body {
 .retro-window {
   display: flex;
   flex-direction: column;
-  background: #000; 
+  background: #000;
   height: 100%;
+  overflow: hidden;
 
   /* Thin 2px outer border so it matches everything else: */
   border: 2px solid #00ff00;
 
-  /* Keep the “inset” effect but can reduce thickness if you want:
-     e.g. `inset -1px -1px 0 #003300, inset 1px 1px 0 #000000` 
+  /* Keep the "inset" effect but can reduce thickness if you want:
+     e.g. `inset -1px -1px 0 #003300, inset 1px 1px 0 #000000`
      so it doesn't get too thick visually. */
   box-shadow:
     0 0 8px rgba(0,255,0,0.5),
@@ -939,8 +940,8 @@ body {
 ========================================= */
 @media (max-width: 480px) {
   .console-input {
-    padding: 4px;
-    gap: 4px;
+    padding: 6px 8px;
+    gap: 6px;
   }
   .input-field {
     padding: 6px 4px;
@@ -949,6 +950,15 @@ body {
   .submit-btn {
     padding: 6px 8px;
     font-size: 12px;
+    box-shadow: none;
+  }
+  .submit-btn:hover {
+    box-shadow: none;
+    transform: none;
+  }
+  .submit-btn:active {
+    box-shadow: none;
+    transform: none;
   }
   .retro-title-bar {
     height: 28px;
