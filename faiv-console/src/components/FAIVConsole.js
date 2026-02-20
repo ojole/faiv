@@ -358,14 +358,24 @@ export default function FAIVConsole() {
   // API health status
   const [apiStatus, setApiStatus] = useState("checking"); // "ok" | "down" | "checking"
 
-  // Store deliberation text per message index
-  const [deliberations, setDeliberations] = useState({});
+  // Store deliberation text per message index (persisted in localStorage)
+  const [deliberations, setDeliberations] = useState(() => {
+    try {
+      const stored = localStorage.getItem("faiv_deliberations");
+      return stored ? JSON.parse(stored) : {};
+    } catch { return {}; }
+  });
 
   // Re-deliberation loading state
   const [redeliberating, setRedeliberating] = useState(false);
 
-  // Track which tiles have replies: { "delibKey-entryIdx": replyMsgIdx }
-  const [repliedTiles, setRepliedTiles] = useState({});
+  // Track which tiles have replies: { "delibKey-entryIdx": replyMsgIdx } (persisted in localStorage)
+  const [repliedTiles, setRepliedTiles] = useState(() => {
+    try {
+      const stored = localStorage.getItem("faiv_replied_tiles");
+      return stored ? JSON.parse(stored) : {};
+    } catch { return {}; }
+  });
 
   // Error details (for expandable display)
   const [lastError, setLastError] = useState(null);
@@ -427,6 +437,15 @@ export default function FAIVConsole() {
   useEffect(() => {
     localStorage.setItem("faiv_sessions", JSON.stringify(allSessions));
   }, [allSessions]);
+
+  // 3b) Persist deliberations and replied tiles
+  useEffect(() => {
+    localStorage.setItem("faiv_deliberations", JSON.stringify(deliberations));
+  }, [deliberations]);
+
+  useEffect(() => {
+    localStorage.setItem("faiv_replied_tiles", JSON.stringify(repliedTiles));
+  }, [repliedTiles]);
 
   // 4) Animate progress bar
   useEffect(() => {
@@ -505,6 +524,22 @@ export default function FAIVConsole() {
     setAllSessions((prev) => {
       const copy = { ...prev };
       delete copy[sessId];
+      return copy;
+    });
+
+    // Clean up deliberations and replied tiles for deleted session
+    setDeliberations((prev) => {
+      const copy = { ...prev };
+      Object.keys(copy).forEach((key) => {
+        if (key.startsWith(sessId + "-")) delete copy[key];
+      });
+      return copy;
+    });
+    setRepliedTiles((prev) => {
+      const copy = { ...prev };
+      Object.keys(copy).forEach((key) => {
+        if (key.startsWith(sessId + "-")) delete copy[key];
+      });
       return copy;
     });
 
@@ -715,7 +750,21 @@ export default function FAIVConsole() {
       ...prev,
       [activeSessionId]: { ...prev[activeSessionId], messages: [], title: "Untitled" },
     }));
-    setDeliberations({});
+    // Clean up deliberations and replied tiles for this session only
+    setDeliberations((prev) => {
+      const copy = { ...prev };
+      Object.keys(copy).forEach((key) => {
+        if (key.startsWith(activeSessionId + "-")) delete copy[key];
+      });
+      return copy;
+    });
+    setRepliedTiles((prev) => {
+      const copy = { ...prev };
+      Object.keys(copy).forEach((key) => {
+        if (key.startsWith(activeSessionId + "-")) delete copy[key];
+      });
+      return copy;
+    });
     setLastError(null);
   }
 
