@@ -877,18 +877,19 @@ body {
 
   /* Input area touch friendly */
   .console-input {
-    padding: 8px;
+    padding: 6px;
     align-items: stretch;
-    gap: 8px;
+    gap: 6px;
   }
   .input-field {
     font-size: 16px; /* prevents iOS zoom on focus */
-    padding: 8px 6px;
+    padding: 6px;
     margin-right: 0;
     border-width: 2px;
+    min-width: 0;
   }
   .submit-btn {
-    padding: 8px 14px;
+    padding: 6px 10px;
     border-width: 2px;
     flex-shrink: 0;
     display: flex;
@@ -930,5 +931,35 @@ body {
   /* ASCII loader: scale down */
   .ascii-logo {
     font-size: 10px;
+  }
+}
+
+/* =========================================
+   19) Extra-small viewports (iframes, embedded)
+========================================= */
+@media (max-width: 480px) {
+  .console-input {
+    padding: 4px;
+    gap: 4px;
+  }
+  .input-field {
+    padding: 6px 4px;
+    font-size: 14px;
+  }
+  .submit-btn {
+    padding: 6px 8px;
+    font-size: 12px;
+  }
+  .retro-title-bar {
+    height: 28px;
+    padding: 2px 4px;
+    font-size: 11px;
+  }
+  .pillar-dropdown-wrapper {
+    font-size: 11px;
+    padding: 2px 4px;
+  }
+  .page-title {
+    font-size: 11px;
   }
 }

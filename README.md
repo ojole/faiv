@@ -2,7 +2,13 @@
 
 # FAIV — Five-Pillar AI Council Framework
 
+> *In memory of Derek — uncle, father figure, and the person who first taught me that there are pillars of humanity that, if mastered, lead to a happier life. His belief was simple: focus on the pillars that matter, become a student of each, and you'll always find your way. FAIV turns that philosophy into something tangible — a council that deliberates the way he encouraged me to think.*
+
+---
+
 FAIV is a decision-intelligence framework that routes user queries through a council of 25 AI personas organized into five philosophical pillars. Rather than returning a single AI opinion, FAIV simulates a genuine multi-perspective debate — each council member argues from their unique worldview, challenges each other directly, and produces a synthesized consensus grounded in the actual deliberation.
+
+The core idea: better decisions emerge from structured disagreement. FAIV doesn't optimize for a single "correct" answer — it forges answers through authentic tension between wisdom, strategy, creativity, foresight, and moral accountability. Users don't just receive answers; they participate in the deliberation itself, injecting their own arguments into the council's debate and watching as 25 deeply characterized personas respond, adapt, and sometimes change their minds.
 
 **Live:** [https://faiv.ai](https://faiv.ai)
 
@@ -54,7 +60,7 @@ faiv/
 │   │       ├── FAIVConsole.js   # Main UI component
 │   │       └── FAIVConsole.css  # Retro terminal styling
 │   ├── public/
-│   │   ├── favicon.svg          # Green V favicon
+│   │   ├── favicon.png          # FAIV favicon
 │   │   ├── index.html
 │   │   └── manifest.json
 │   └── package.json
@@ -197,6 +203,14 @@ FAIV is built on the premise that better decisions emerge from structured disagr
 - **Integrity** holds the process accountable to fairness and moral standards
 
 The result is a consensus that has been stress-tested from multiple angles — not just an answer, but an answer that has survived genuine debate.
+
+### What Makes FAIV Different
+
+Most AI tools give you one voice with one opinion. FAIV gives you five perspectives in active conflict — and then invites you to join the argument. The interactive re-deliberation system means you aren't a passive consumer of AI output. You're a participant in a structured debate, pushing back on reasoning you disagree with and watching the council adapt in real time.
+
+Each council member isn't a shallow "mode" or persona label. They're defined by 16 deep identity fields — their faith, their vices, their defining memories, the causes they fight for, the members they align with and conflict against. When Kyre (The Skeptical Philosopher) challenges Iom (The Calculated Risk-Taker), it's not templated disagreement — it's a genuine clash of worldviews informed by the full depth of their character.
+
+The five pillars themselves reflect a fundamental belief: that no single lens on reality is sufficient. Wisdom without strategy is impractical. Strategy without integrity is dangerous. Expansion without foresight is reckless. Every decision benefits from being examined through all five, and FAIV makes that examination automatic, authentic, and interactive.
 
 ---
 
