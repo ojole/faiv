@@ -791,6 +791,10 @@ body {
 @media (max-width: 768px) {
   .outer-container {
     padding: 0;
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+    padding-left: env(safe-area-inset-left, 0px);
+    padding-right: env(safe-area-inset-right, 0px);
   }
 
   .windows-container {
@@ -871,13 +875,19 @@ body {
   /* Input area touch friendly */
   .console-input {
     padding: 6px;
+    padding-bottom: calc(6px + env(safe-area-inset-bottom, 0px));
+    align-items: center;
+    gap: 6px;
   }
   .input-field {
     font-size: 16px; /* prevents iOS zoom on focus */
     padding: 8px 6px;
+    margin-right: 0;
   }
   .submit-btn {
     padding: 8px 14px;
+    align-self: center;
+    flex-shrink: 0;
   }
 
   /* Chat items: larger tap targets */
