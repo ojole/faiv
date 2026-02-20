@@ -257,20 +257,30 @@ body {
 }
 
 /* Custom scrollbars — unified for all scrollable areas */
+.left-window-body,
+.right-console-body,
+.deliberation-pre,
+.deliberation-tiles-container {
+  scrollbar-width: thin;
+  scrollbar-color: #00ff00 black;
+}
 .left-window-body::-webkit-scrollbar,
 .right-console-body::-webkit-scrollbar,
-.deliberation-pre::-webkit-scrollbar {
+.deliberation-pre::-webkit-scrollbar,
+.deliberation-tiles-container::-webkit-scrollbar {
   width: 10px;
   height: 10px;
 }
 .left-window-body::-webkit-scrollbar-track,
 .right-console-body::-webkit-scrollbar-track,
-.deliberation-pre::-webkit-scrollbar-track {
+.deliberation-pre::-webkit-scrollbar-track,
+.deliberation-tiles-container::-webkit-scrollbar-track {
   background: black;
 }
 .left-window-body::-webkit-scrollbar-thumb,
 .right-console-body::-webkit-scrollbar-thumb,
-.deliberation-pre::-webkit-scrollbar-thumb {
+.deliberation-pre::-webkit-scrollbar-thumb,
+.deliberation-tiles-container::-webkit-scrollbar-thumb {
   background: #00ff00;
   box-shadow: inset -2px -2px 0 #003300, inset 2px 2px 0 #000000;
 }
@@ -577,11 +587,6 @@ body {
   font-family: "Courier New", monospace;
 }
 
-/* Firefox scrollbar theming for deliberation */
-.deliberation-pre {
-  scrollbar-width: thin;
-  scrollbar-color: #00ff00 black;
-}
 
 /* =========================================
    12) Page Title
@@ -767,19 +772,6 @@ body {
   gap: 6px;
 }
 
-/* Tiles container scrollbar — match main chat */
-.deliberation-tiles-container::-webkit-scrollbar {
-  width: 10px;
-  height: 10px;
-}
-.deliberation-tiles-container::-webkit-scrollbar-track {
-  background: black;
-}
-.deliberation-tiles-container::-webkit-scrollbar-thumb {
-  background: #00ff00;
-  box-shadow: inset -2px -2px 0 #003300, inset 2px 2px 0 #000000;
-}
-
 /* =========================================
    17) Mobile History Toggle Button
 ========================================= */
@@ -923,10 +915,28 @@ body {
     width: 85vw;
     max-width: 320px;
   }
+  .modal-box input {
+    font-size: 16px; /* prevents iOS zoom on focus */
+  }
+
+  /* All text inputs: prevent iOS zoom (must be >= 16px) */
+  .tile-comment-input {
+    font-size: 16px;
+    padding: 6px 8px;
+  }
 
   /* Deliberation tiles: full width */
   .deliberation-tiles-container {
     max-height: 200px;
+  }
+
+  /* Scrollbars: consistent retro theme on mobile */
+  .left-window-body,
+  .right-console-body,
+  .deliberation-pre,
+  .deliberation-tiles-container {
+    scrollbar-width: thin;
+    scrollbar-color: #00ff00 black;
   }
 
   /* ASCII loader: scale down */
@@ -945,7 +955,7 @@ body {
   }
   .input-field {
     padding: 6px 4px;
-    font-size: 14px;
+    font-size: 16px; /* must stay >= 16px to prevent iOS zoom */
   }
   .submit-btn {
     padding: 6px 8px;
