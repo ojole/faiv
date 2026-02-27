@@ -5,7 +5,7 @@ import "./FAIVConsole.css";
  * 0) API Base URL (configurable via env)
  ****************************************/
 const API_BASE =
-  process.env.REACT_APP_API_BASE_URL || "http://127.0.0.1:8000";
+  process.env.REACT_APP_API_BASE_URL || "https://api.faiv.ai";
 
 /****************************************
  * 1) ASCII Loader Frames
@@ -419,9 +419,10 @@ export default function FAIVConsole() {
         setUnlockError("");
       } catch {
         if (!alive) return;
-        // Fail open for UX if auth-status endpoint is unreachable.
-        setPasswordProtected(false);
-        setIsUnlocked(true);
+        // Security-first: fail closed if auth status cannot be verified.
+        setPasswordProtected(true);
+        setIsUnlocked(false);
+        setUnlockError("Unable to verify access status. Try again.");
       } finally {
         if (alive) setAuthStatusLoading(false);
       }
