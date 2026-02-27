@@ -3,9 +3,15 @@ import re
 import json
 import random
 import logging
+import time
+import uuid
+from pathlib import Path
+from datetime import datetime, timezone
+from urllib.parse import quote
 from openai import OpenAI
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from typing import Optional
 from fastapi.middleware.cors import CORSMiddleware
@@ -17,6 +23,43 @@ from faiv_app.identity_codex import FAIV_IDENTITY_CODEX
 ################################################
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
+
+# Load local env files when present (cPanel/host env vars still take precedence).
+BASE_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = BASE_DIR.parent
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv(PROJECT_ROOT / ".env.local", override=False)
+    load_dotenv(PROJECT_ROOT / ".env", override=False)
+except Exception as env_ex:
+    logger.warning(f"python-dotenv load skipped: {env_ex}")
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+ENV_NAME = (
+    os.getenv("FAIV_ENV")
+    or os.getenv("PYTHON_ENV")
+    or os.getenv("ENV")
+    or ""
+).strip().lower()
+IS_PRODUCTION = ENV_NAME in {"prod", "production"}
+SITE_PASSWORD = os.getenv("FAIV_SITE_PASSWORD", "")
+VISITOR_COOKIE_NAME = "faiv_vid"
+AUTH_COOKIE_NAME = "faiv_auth"
+VISITOR_COOKIE_MAX_AGE = 60 * 60 * 24 * 365
+AUTH_COOKIE_MAX_AGE = 60 * 60 * 24 * 7
+RATE_LIMIT_PER_MINUTE = int(os.getenv("FAIV_RATE_LIMIT_PER_MINUTE", "10"))
+ENABLE_OPENAI_MODERATION_GATE = _env_flag("FAIV_ENABLE_MODERATION_GATE", default=False)
+
+# In-memory rate-limit fallback when Redis is unavailable
+_memory_rate_limits = {}
 
 # In-memory session fallback when Redis is unavailable
 _memory_sessions = {}
@@ -68,6 +111,125 @@ if not OPENAI_API_KEY:
     client = None
 else:
     client = OpenAI(api_key=OPENAI_API_KEY)
+
+
+def _cookie_secure(request: Request) -> bool:
+    if IS_PRODUCTION:
+        return True
+    x_forwarded_proto = request.headers.get("x-forwarded-proto", "").lower()
+    if x_forwarded_proto == "https":
+        return True
+    return request.url.scheme == "https"
+
+
+def _set_visitor_cookie(response, request: Request, visitor_id: str) -> None:
+    response.set_cookie(
+        key=VISITOR_COOKIE_NAME,
+        value=visitor_id,
+        httponly=True,
+        samesite="lax",
+        secure=_cookie_secure(request),
+        max_age=VISITOR_COOKIE_MAX_AGE,
+    )
+
+
+def _set_auth_cookie(response, request: Request) -> None:
+    response.set_cookie(
+        key=AUTH_COOKIE_NAME,
+        value="1",
+        httponly=True,
+        samesite="lax",
+        secure=_cookie_secure(request),
+        max_age=AUTH_COOKIE_MAX_AGE,
+    )
+
+
+def _public_path(path: str) -> bool:
+    if path in {"/locked", "/api/unlock", "/health", "/openapi.json", "/docs", "/redoc"}:
+        return True
+    if path.startswith("/static/"):
+        return True
+    return False
+
+
+def _api_path(path: str) -> bool:
+    return path.startswith("/query") or path.startswith("/redeliberate") or path.startswith("/reset")
+
+
+def is_disallowed_prompt(text: str) -> bool:
+    if not text:
+        return False
+
+    normalized = re.sub(r"\s+", " ", text.strip().lower())
+    if not normalized:
+        return False
+
+    disallowed_patterns = [
+        re.compile(r"\bcsam\b", re.IGNORECASE),
+        re.compile(r"\bchild\s+sexual\s+abuse\s+material\b", re.IGNORECASE),
+        re.compile(r"\b(?:sexual|sex)\b.{0,28}\b(?:minor|child|underage)\b", re.IGNORECASE),
+        re.compile(r"\b(?:minor|child|underage)\b.{0,28}\b(?:sexual|sex)\b", re.IGNORECASE),
+        re.compile(r"\b(?:groom|grooming)\b.{0,20}\b(?:child|minor|underage)\b", re.IGNORECASE),
+        re.compile(r"\b(?:nude|explicit|porn)\b.{0,28}\b(?:child|minor|underage)\b", re.IGNORECASE),
+    ]
+    return any(pattern.search(normalized) for pattern in disallowed_patterns)
+
+
+def moderation_gate(text: str) -> bool:
+    """Optional OpenAI moderation gate. Returns True when input should be blocked."""
+    if not ENABLE_OPENAI_MODERATION_GATE or client is None or not text:
+        return False
+    try:
+        moderation_model = os.getenv("OPENAI_MODERATION_MODEL", "omni-moderation-latest")
+        moderation = client.moderations.create(model=moderation_model, input=text)
+        result = moderation.results[0] if moderation and moderation.results else None
+        return bool(getattr(result, "flagged", False))
+    except Exception as ex:
+        logger.warning(f"Moderation gate failed open: {ex}")
+        return False
+
+
+def _cleanup_rate_limit_cache(now_ts: float) -> None:
+    stale_keys = [key for key, (_, expires_ts) in _memory_rate_limits.items() if expires_ts <= now_ts]
+    for key in stale_keys:
+        _memory_rate_limits.pop(key, None)
+
+
+def rate_limit_ok(visitor_id: str) -> bool:
+    if not visitor_id:
+        return True
+
+    now_ts = time.time()
+    minute_bucket = int(now_ts // 60)
+    key = f"rl:{visitor_id}:{minute_bucket}"
+
+    if _redis_available and redis_client is not None:
+        try:
+            count = redis_client.incr(key)
+            if count == 1:
+                redis_client.expire(key, 60)
+            return count <= RATE_LIMIT_PER_MINUTE
+        except Exception as ex:
+            logger.warning(f"Redis rate-limit failed, using memory fallback: {ex}")
+
+    _cleanup_rate_limit_cache(now_ts)
+    count, expires_ts = _memory_rate_limits.get(key, (0, now_ts + 60))
+    if expires_ts <= now_ts:
+        count = 0
+        expires_ts = now_ts + 60
+    count += 1
+    _memory_rate_limits[key] = (count, expires_ts)
+    return count <= RATE_LIMIT_PER_MINUTE
+
+
+def _log_block_event(request: Request, visitor_id: str, reason: str) -> None:
+    logger.warning(
+        "blocked_request visitor_id=%s path=%s blocked=True reason=%s ts=%s",
+        visitor_id,
+        request.url.path,
+        reason,
+        datetime.now(timezone.utc).isoformat(),
+    )
 
 
 ################################################
@@ -419,7 +581,13 @@ def extract_faiv_final_output(text: str, pillar: str = "FAIV") -> str:
 # 5) The function that calls OpenAI
 ################################################
 
-def query_openai_faiv(session_id: str, user_input: str, pillar: str = "FAIV", model: str = "gpt-4o") -> tuple:
+def query_openai_faiv(
+    session_id: str,
+    user_input: str,
+    pillar: str = "FAIV",
+    model: str = "gpt-4o",
+    safety_id: Optional[str] = None,
+) -> tuple:
     """Returns (parsed_final, deliberation_text, raw_response, selected_members) tuple."""
     if client is None:
         return ("OpenAI API Error: OPENAI_API_KEY is not set. Please set the environment variable and restart.", "", "", {})
@@ -475,7 +643,8 @@ def query_openai_faiv(session_id: str, user_input: str, pillar: str = "FAIV", mo
             top_p=0.8,
             frequency_penalty=0.3,
             presence_penalty=0.2,
-            max_tokens=2048
+            max_tokens=2048,
+            user=safety_id or session_id,
         )
         raw = resp.choices[0].message.content.strip()
         deliberation, final_text = split_response_sections(raw)
@@ -508,6 +677,10 @@ class RedeliberateRequest(BaseModel):
     council_members: list = []
 
 
+class UnlockRequest(BaseModel):
+    password: str
+
+
 fastapi_app = FastAPI()
 fastapi_app.add_middleware(
     CORSMiddleware,
@@ -521,6 +694,44 @@ fastapi_app.add_middleware(
     allow_methods=["OPTIONS", "GET", "POST"],
     allow_headers=["*"],
 )
+
+STATIC_DIR = BASE_DIR / "static"
+STATIC_DIR.mkdir(parents=True, exist_ok=True)
+fastapi_app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+
+@fastapi_app.middleware("http")
+async def faiv_security_middleware(request: Request, call_next):
+    visitor_id = request.cookies.get(VISITOR_COOKIE_NAME)
+    has_new_visitor_cookie = False
+    if not visitor_id:
+        visitor_id = str(uuid.uuid4())
+        has_new_visitor_cookie = True
+
+    path = request.url.path
+    if SITE_PASSWORD and request.method != "OPTIONS" and not _public_path(path):
+        if request.cookies.get(AUTH_COOKIE_NAME) != "1":
+            if _api_path(path):
+                response = JSONResponse(
+                    status_code=401,
+                    content={"error": "Password required. Unlock access first."},
+                )
+            else:
+                target = request.url.path
+                if request.url.query:
+                    target = f"{target}?{request.url.query}"
+                response = RedirectResponse(
+                    url=f"/locked?next={quote(target, safe='')}",
+                    status_code=307,
+                )
+            if has_new_visitor_cookie:
+                _set_visitor_cookie(response, request, visitor_id)
+            return response
+
+    response = await call_next(request)
+    if has_new_visitor_cookie:
+        _set_visitor_cookie(response, request, visitor_id)
+    return response
 
 
 @fastapi_app.exception_handler(Exception)
@@ -537,6 +748,207 @@ async def global_exception_handler(request: Request, exc: Exception):
     )
 
 
+@fastapi_app.get("/locked", response_class=HTMLResponse)
+async def locked_screen():
+    gif_path = "/static/faiv_ascii_logo.gif"
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>FAIV — Password Protected</title>
+  <style>
+    :root {{
+      --bg: #020702;
+      --panel: #001600;
+      --line: #00ff66;
+      --line-dim: #00a845;
+      --text: #8dffb8;
+      --error: #ff5f7e;
+    }}
+    html, body {{
+      margin: 0;
+      height: 100%;
+      background: radial-gradient(circle at center, #031003 0%, #000 70%);
+      color: var(--text);
+      font-family: "Courier New", ui-monospace, Menlo, Monaco, monospace;
+    }}
+    .shell {{
+      min-height: 100%;
+      display: grid;
+      place-items: center;
+      padding: 20px;
+    }}
+    .stack {{
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 16px;
+    }}
+    .ascii-gif {{
+      width: min(92vw, 640px);
+      image-rendering: pixelated;
+      border: 2px solid var(--line-dim);
+      box-shadow: 0 0 26px rgba(0, 255, 102, 0.18), inset 0 0 14px rgba(0, 255, 102, 0.1);
+      background: #000;
+    }}
+    .window {{
+      width: min(92vw, 420px);
+      border: 2px solid var(--line);
+      background: var(--panel);
+      box-shadow: 0 0 18px rgba(0, 255, 102, 0.28);
+    }}
+    .title {{
+      background: var(--line);
+      color: #001000;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      font-size: 13px;
+      padding: 7px 10px;
+    }}
+    .body {{
+      padding: 14px;
+      border-top: 2px solid var(--line);
+    }}
+    .hint {{
+      margin: 0 0 10px;
+      font-size: 12px;
+      color: #67ff9e;
+      opacity: 0.9;
+    }}
+    .row {{
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }}
+    input[type=password] {{
+      flex: 1;
+      background: #000;
+      color: var(--line);
+      border: 2px solid var(--line);
+      outline: none;
+      padding: 7px 9px;
+      font-family: inherit;
+      font-size: 14px;
+    }}
+    button {{
+      border: 2px solid var(--line);
+      background: #003400;
+      color: var(--line);
+      font-family: inherit;
+      font-size: 13px;
+      font-weight: 700;
+      padding: 7px 10px;
+      cursor: pointer;
+    }}
+    button:hover {{
+      background: #015f2a;
+    }}
+    .error {{
+      margin-top: 10px;
+      min-height: 18px;
+      color: var(--error);
+      font-size: 12px;
+    }}
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <div class="stack">
+      <img src="{gif_path}" alt="FAIV ASCII animated logo" class="ascii-gif" />
+      <div class="window">
+        <div class="title">PASSWORD PROTECTED</div>
+        <div class="body">
+          <p class="hint">Enter the FAIV access password to continue.</p>
+          <form id="unlock-form" autocomplete="off">
+            <div class="row">
+              <input id="password" type="password" name="password" required />
+              <button id="unlock-btn" type="submit">UNLOCK</button>
+            </div>
+          </form>
+          <div id="error" class="error"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <script>
+    const form = document.getElementById('unlock-form');
+    const passwordInput = document.getElementById('password');
+    const unlockBtn = document.getElementById('unlock-btn');
+    const errorEl = document.getElementById('error');
+    const params = new URLSearchParams(window.location.search);
+    const nextTarget = params.get('next') || '/';
+
+    form.addEventListener('submit', async (event) => {{
+      event.preventDefault();
+      errorEl.textContent = '';
+      unlockBtn.disabled = true;
+      try {{
+        const resp = await fetch('/api/unlock', {{
+          method: 'POST',
+          headers: {{ 'content-type': 'application/json' }},
+          credentials: 'include',
+          body: JSON.stringify({{ password: passwordInput.value }})
+        }});
+        const data = await resp.json().catch(() => ({{}}));
+        if (!resp.ok) {{
+          errorEl.textContent = data.error || 'Unlock failed.';
+          unlockBtn.disabled = false;
+          return;
+        }}
+        window.location.href = nextTarget;
+      }} catch {{
+        errorEl.textContent = 'Network error. Try again.';
+        unlockBtn.disabled = false;
+      }}
+    }});
+  </script>
+</body>
+</html>"""
+
+
+@fastapi_app.post("/api/unlock")
+async def unlock_endpoint(payload: UnlockRequest, request: Request):
+    if not SITE_PASSWORD:
+        response = JSONResponse({"status": "ok", "unlocked": True, "passwordConfigured": False})
+        _set_auth_cookie(response, request)
+        return response
+
+    if payload.password != SITE_PASSWORD:
+        return JSONResponse(
+            status_code=401,
+            content={"error": "Invalid password."},
+        )
+
+    response = JSONResponse({"status": "ok", "unlocked": True})
+    _set_auth_cookie(response, request)
+    return response
+
+
+@fastapi_app.get("/", response_class=HTMLResponse)
+async def root_landing():
+    return """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>FAIV API</title>
+  <style>
+    body { background:#000; color:#00ff66; font-family:"Courier New",ui-monospace,monospace; margin:0; padding:24px; }
+    .box { border:2px solid #00ff66; padding:16px; max-width:720px; box-shadow:0 0 12px rgba(0,255,102,.25); }
+    a { color:#8dffb8; }
+  </style>
+</head>
+<body>
+  <div class="box">
+    <h3>FAIV backend unlocked</h3>
+    <p>API is online. Use <code>/query/</code>, <code>/redeliberate/</code>, and <code>/reset/</code>.</p>
+    <p>Health: <a href="/health">/health</a> | Lock screen: <a href="/locked">/locked</a></p>
+  </div>
+</body>
+</html>"""
+
+
 @fastapi_app.get("/health")
 async def health():
     return {
@@ -544,22 +956,43 @@ async def health():
         "redis": _redis_available,
         "model": "gpt-4o",
         "openai_configured": client is not None,
+        "password_gate_enabled": bool(SITE_PASSWORD),
     }
 
 
 @fastapi_app.post("/query/")
-async def query_faiv_endpoint(request: QueryRequest):
+async def query_faiv_endpoint(payload: QueryRequest, request: Request):
     try:
-        session_id = request.session_id
-        user_input = request.input_text
-        chosen_pillar = request.pillar or "FAIV"
+        visitor_id = request.cookies.get(VISITOR_COOKIE_NAME) or str(uuid.uuid4())
+        if not rate_limit_ok(visitor_id):
+            return JSONResponse(
+                status_code=429,
+                content={"error": "Too many requests. Try again shortly."},
+            )
+
+        session_id = payload.session_id
+        user_input = payload.input_text
+        chosen_pillar = payload.pillar or "FAIV"
+
+        blocked = is_disallowed_prompt(user_input) or moderation_gate(user_input)
+        if blocked:
+            _log_block_event(request, visitor_id, "disallowed_prompt")
+            return JSONResponse(
+                status_code=400,
+                content={"error": "Blocked. This content violates safety rules."},
+            )
 
         raw_data = session_get(session_id)
         past_messages = json.loads(raw_data) if raw_data else []
         if not isinstance(past_messages, list):
             past_messages = []
 
-        parsed, deliberation, _raw, selected_members = query_openai_faiv(session_id, user_input, chosen_pillar)
+        parsed, deliberation, _raw, selected_members = query_openai_faiv(
+            session_id,
+            user_input,
+            chosen_pillar,
+            safety_id=visitor_id,
+        )
         council = {name: data["pillar"] for name, data in selected_members.items()}
 
         if "Consensus:" not in parsed:
@@ -594,8 +1027,8 @@ async def query_faiv_endpoint(request: QueryRequest):
             detail={
                 "status": "error",
                 "response": "Internal server error.",
-                "pillar": request.pillar,
-                "session_id": request.session_id,
+                "pillar": payload.pillar,
+                "session_id": payload.session_id,
             }
         )
 
@@ -609,6 +1042,7 @@ def query_openai_redeliberate(
     pillar: str = "FAIV",
     council_members: list = None,
     model: str = "gpt-4o",
+    safety_id: Optional[str] = None,
 ) -> tuple:
     """Re-deliberate from a specific point with user interjection.
     Returns (parsed_final, deliberation_text, raw_response, selected_members) tuple."""
@@ -701,6 +1135,7 @@ RESPONSE FORMAT (MANDATORY):
             frequency_penalty=0.3,
             presence_penalty=0.2,
             max_tokens=2048,
+            user=safety_id or session_id,
         )
         raw = resp.choices[0].message.content.strip()
         deliberation, final_text = split_response_sections(raw)
@@ -714,10 +1149,32 @@ RESPONSE FORMAT (MANDATORY):
 
 
 @fastapi_app.post("/redeliberate/")
-async def redeliberate_endpoint(request: RedeliberateRequest):
+async def redeliberate_endpoint(payload: RedeliberateRequest, request: Request):
     try:
-        session_id = request.session_id
-        chosen_pillar = request.pillar or "FAIV"
+        visitor_id = request.cookies.get(VISITOR_COOKIE_NAME) or str(uuid.uuid4())
+        if not rate_limit_ok(visitor_id):
+            return JSONResponse(
+                status_code=429,
+                content={"error": "Too many requests. Try again shortly."},
+            )
+
+        session_id = payload.session_id
+        chosen_pillar = payload.pillar or "FAIV"
+
+        disallowed_text = "\n".join(
+            [
+                payload.original_input or "",
+                payload.deliberation_up_to or "",
+                payload.user_comment or "",
+            ]
+        )
+        blocked = is_disallowed_prompt(disallowed_text) or moderation_gate(disallowed_text)
+        if blocked:
+            _log_block_event(request, visitor_id, "disallowed_redeliberation")
+            return JSONResponse(
+                status_code=400,
+                content={"error": "Blocked. This content violates safety rules."},
+            )
 
         raw_data = session_get(session_id)
         past_messages = json.loads(raw_data) if raw_data else []
@@ -726,12 +1183,13 @@ async def redeliberate_endpoint(request: RedeliberateRequest):
 
         parsed, deliberation, _raw, selected_members = query_openai_redeliberate(
             session_id=session_id,
-            original_input=request.original_input,
-            deliberation_up_to=request.deliberation_up_to,
-            user_comment=request.user_comment,
-            target_member=request.target_member,
+            original_input=payload.original_input,
+            deliberation_up_to=payload.deliberation_up_to,
+            user_comment=payload.user_comment,
+            target_member=payload.target_member,
             pillar=chosen_pillar,
-            council_members=request.council_members,
+            council_members=payload.council_members,
+            safety_id=visitor_id,
         )
         council = {name: data["pillar"] for name, data in selected_members.items()}
 
@@ -745,7 +1203,7 @@ async def redeliberate_endpoint(request: RedeliberateRequest):
                 "council": council,
             }
 
-        past_messages.append({"role": "user", "content": f"[Re-deliberation on {request.target_member}]: {request.user_comment}"})
+        past_messages.append({"role": "user", "content": f"[Re-deliberation on {payload.target_member}]: {payload.user_comment}"})
         past_messages.append({"role": "assistant", "content": parsed})
         session_set(session_id, json.dumps(past_messages, ensure_ascii=False))
 
@@ -765,8 +1223,8 @@ async def redeliberate_endpoint(request: RedeliberateRequest):
             detail={
                 "status": "error",
                 "response": "Internal server error.",
-                "pillar": request.pillar,
-                "session_id": request.session_id,
+                "pillar": payload.pillar,
+                "session_id": payload.session_id,
             },
         )
 

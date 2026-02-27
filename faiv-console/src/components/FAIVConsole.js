@@ -394,7 +394,9 @@ export default function FAIVConsole() {
   useEffect(() => {
     async function checkHealth() {
       try {
-        const resp = await fetch(`${API_BASE}/health`);
+        const resp = await fetch(`${API_BASE}/health`, {
+          credentials: "include",
+        });
         if (resp.ok) {
           setApiStatus("ok");
         } else {
@@ -599,6 +601,7 @@ export default function FAIVConsole() {
           "Content-Type": "application/json",
           Accept: "application/json",
         },
+        credentials: "include",
         body: JSON.stringify({
           session_id: activeSessionId,
           input_text: capturedInput,
@@ -684,6 +687,7 @@ export default function FAIVConsole() {
       const resp = await fetch(`${API_BASE}/redeliberate/`, {
         method: "POST",
         headers: { "Content-Type": "application/json", Accept: "application/json" },
+        credentials: "include",
         body: JSON.stringify({
           session_id: activeSessionId,
           original_input: originalInput,
@@ -741,6 +745,7 @@ export default function FAIVConsole() {
     try {
       await fetch(`${API_BASE}/reset/?session_id=${encodeURIComponent(activeSessionId)}`, {
         method: "POST",
+        credentials: "include",
       });
     } catch {
       // Backend reset is best-effort; clear locally regardless
