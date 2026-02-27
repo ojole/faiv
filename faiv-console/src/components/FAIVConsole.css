@@ -995,55 +995,60 @@ body {
 }
 
 .lock-stack {
-  width: min(96vw, 520px);
+  width: min(96vw, 640px);
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 12px;
+  gap: 8px;
 }
 
 .lock-ascii-wrap {
-  width: min(96vw, 500px);
-  border: 2px solid #00aa44;
-  background: #000;
-  padding: 8px 12px;
-  box-shadow: 0 0 16px rgba(0, 255, 102, 0.3), inset 0 0 12px rgba(0, 255, 102, 0.12);
-  overflow: hidden;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
 }
 
 .lock-ascii-line {
   margin: 0;
-  color: #00ff66;
+  color: #00ff00;
   font-family: "Courier New", ui-monospace, Menlo, Monaco, monospace;
   font-size: clamp(9px, 1.8vw, 14px);
-  line-height: 1.15;
+  line-height: 1.1;
   white-space: pre;
+  text-align: left;
 }
 
 .lock-window {
-  width: min(96vw, 360px);
-  border: 2px solid #00ff00;
+  width: min(96vw, 460px);
   background: #000;
-  box-shadow: 0 0 14px rgba(0, 255, 102, 0.35), inset -1px -1px 0 #003300, inset 1px 1px 0 #000;
+  border: 2px solid #00ff00;
+  box-shadow:
+    0 0 8px rgba(0,255,0,0.5),
+    inset -1px -1px 0 #003300,
+    inset 1px 1px 0 #000000;
+  overflow: hidden;
 }
 
 .lock-title-bar {
-  background: #00ff00;
-  color: #001800;
+  color: #000;
   font-size: 14px;
-  font-weight: bold;
-  letter-spacing: 0.08em;
-  padding: 7px 10px;
+  letter-spacing: 0.04em;
+  justify-content: flex-start;
 }
 
 .lock-window-body {
   border-top: 2px solid #00ff00;
-  padding: 12px;
+  padding: 8px;
+  background: #000;
 }
 
 .lock-form {
   display: flex;
   gap: 8px;
+  align-items: center;
 }
 
 .lock-input {
@@ -1053,28 +1058,51 @@ body {
   border: 2px solid #00ff00;
   font-family: "Courier New", monospace;
   font-size: 14px;
-  padding: 6px 8px;
+  padding: 4px;
+  outline: none;
 }
 
 .lock-submit {
-  background: #003500;
-  color: #00ff00;
-  border: 2px solid #00ff00;
-  font-family: "Courier New", monospace;
   font-weight: bold;
+  background: #111;
+  color: #00ff00;
+  border: 1px solid #00ff00;
+  font-family: "Courier New", monospace;
   font-size: 13px;
-  padding: 6px 10px;
+  padding: 4px 14px;
   cursor: pointer;
+  box-shadow:
+    0 2px 0 #003300,
+    inset 0 1px 0 rgba(0,255,0,0.1);
 }
 
 .lock-submit:disabled {
   opacity: 0.7;
   cursor: default;
+  transform: none;
+  box-shadow: none;
+}
+
+.lock-submit:hover {
+  background: #1a1a1a;
+  box-shadow:
+    0 3px 0 #003300,
+    inset 0 1px 0 rgba(0,255,0,0.15);
+  transform: translateY(-1px);
+}
+
+.lock-submit:active {
+  background: #0a0a0a;
+  box-shadow:
+    0 0px 0 #003300,
+    inset 0 1px 0 rgba(0,255,0,0.05);
+  transform: translateY(2px);
 }
 
 .lock-error {
-  margin-top: 10px;
+  margin-top: 6px;
   min-height: 18px;
   color: #ff7f9d;
   font-size: 12px;
+  font-family: "Courier New", monospace;
 }

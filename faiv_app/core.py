@@ -761,17 +761,14 @@ async def locked_screen():
   <style>
     :root {{
       --bg: #020702;
-      --panel: #001600;
-      --line: #00ff66;
-      --line-dim: #00a845;
-      --text: #8dffb8;
+      --line: #00ff00;
       --error: #ff5f7e;
     }}
     html, body {{
       margin: 0;
       height: 100%;
       background: radial-gradient(circle at center, #031003 0%, #000 70%);
-      color: var(--text);
+      color: var(--line);
       font-family: "Courier New", ui-monospace, Menlo, Monaco, monospace;
     }}
     .shell {{
@@ -784,47 +781,54 @@ async def locked_screen():
       display: flex;
       flex-direction: column;
       align-items: center;
-      gap: 12px;
+      gap: 8px;
     }}
-    .ascii-logo {{
+    .ascii-wrap {{
       margin: 0;
-      padding: 8px 12px;
-      min-width: min(92vw, 470px);
-      border: 2px solid var(--line-dim);
-      background: #000;
+      width: min(96vw, 640px);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      pointer-events: none;
+    }}
+    .ascii-line {{
+      margin: 0;
       color: var(--line);
-      box-shadow: 0 0 26px rgba(0, 255, 102, 0.18), inset 0 0 14px rgba(0, 255, 102, 0.1);
       font-family: "Courier New", ui-monospace, Menlo, Monaco, monospace;
       font-size: clamp(9px, 1.8vw, 14px);
-      line-height: 1.15;
-      letter-spacing: 0.02em;
+      line-height: 1.1;
       white-space: pre;
       text-align: left;
-      overflow: hidden;
     }}
     .window {{
-      width: min(92vw, 360px);
+      width: min(96vw, 460px);
       border: 2px solid var(--line);
-      background: var(--panel);
-      box-shadow: 0 0 18px rgba(0, 255, 102, 0.28);
+      background: #000;
+      box-shadow:
+        0 0 8px rgba(0,255,0,0.5),
+        inset -1px -1px 0 #003300,
+        inset 1px 1px 0 #000000;
+      overflow: hidden;
     }}
     .title {{
       background: var(--line);
-      color: #001000;
+      color: #000;
+      display: flex;
+      align-items: center;
       font-weight: 700;
-      letter-spacing: 0.08em;
-      font-size: 13px;
-      padding: 7px 10px;
+      letter-spacing: 0.04em;
+      font-size: 14px;
+      padding: 6px 8px;
+      box-shadow:
+        inset -1px -1px 0 #003300,
+        inset 1px 1px 0 #99ff99;
+      height: 30px;
     }}
     .body {{
-      padding: 14px;
       border-top: 2px solid var(--line);
-    }}
-    .hint {{
-      margin: 0 0 10px;
-      font-size: 12px;
-      color: #67ff9e;
-      opacity: 0.9;
+      padding: 8px;
+      background: #000;
     }}
     .row {{
       display: flex;
@@ -837,25 +841,40 @@ async def locked_screen():
       color: var(--line);
       border: 2px solid var(--line);
       outline: none;
-      padding: 7px 9px;
+      padding: 4px;
       font-family: inherit;
       font-size: 14px;
     }}
     button {{
-      border: 2px solid var(--line);
-      background: #003400;
+      border: 1px solid var(--line);
+      background: #111;
       color: var(--line);
       font-family: inherit;
       font-size: 13px;
       font-weight: 700;
-      padding: 7px 10px;
+      padding: 4px 14px;
       cursor: pointer;
+      box-shadow:
+        0 2px 0 #003300,
+        inset 0 1px 0 rgba(0,255,0,0.1);
+      transition: transform 0.08s ease, box-shadow 0.08s ease;
     }}
     button:hover {{
-      background: #015f2a;
+      background: #1a1a1a;
+      box-shadow:
+        0 3px 0 #003300,
+        inset 0 1px 0 rgba(0,255,0,0.15);
+      transform: translateY(-1px);
+    }}
+    button:active {{
+      background: #0a0a0a;
+      box-shadow:
+        0 0px 0 #003300,
+        inset 0 1px 0 rgba(0,255,0,0.05);
+      transform: translateY(2px);
     }}
     .error {{
-      margin-top: 10px;
+      margin-top: 6px;
       min-height: 18px;
       color: var(--error);
       font-size: 12px;
@@ -865,11 +884,10 @@ async def locked_screen():
 <body>
   <div class="shell">
     <div class="stack">
-      <pre id="ascii-logo" class="ascii-logo" aria-hidden="true"></pre>
+      <div id="ascii-wrap" class="ascii-wrap" aria-hidden="true"></div>
       <div class="window">
         <div class="title">PASSWORD PROTECTED</div>
         <div class="body">
-          <p class="hint">Enter the FAIV access password to continue.</p>
           <form id="unlock-form" autocomplete="off">
             <div class="row">
               <input id="password" type="password" name="password" required />
@@ -886,7 +904,7 @@ async def locked_screen():
     const passwordInput = document.getElementById('password');
     const unlockBtn = document.getElementById('unlock-btn');
     const errorEl = document.getElementById('error');
-    const asciiLogo = document.getElementById('ascii-logo');
+    const asciiWrap = document.getElementById('ascii-wrap');
     const params = new URLSearchParams(window.location.search);
     const nextTarget = params.get('next') || '/';
     const asciiFAIVFrames = [
@@ -917,8 +935,14 @@ async def locked_screen():
     ];
     let asciiFrameIndex = 0;
     function renderAsciiFrame() {{
-      if (!asciiLogo) return;
-      asciiLogo.textContent = asciiFAIVFrames[asciiFrameIndex].join('\\n');
+      if (!asciiWrap) return;
+      asciiWrap.innerHTML = '';
+      asciiFAIVFrames[asciiFrameIndex].forEach((line) => {{
+        const row = document.createElement('pre');
+        row.className = 'ascii-line';
+        row.textContent = line;
+        asciiWrap.appendChild(row);
+      }});
       asciiFrameIndex = (asciiFrameIndex + 1) % asciiFAIVFrames.length;
     }}
     renderAsciiFrame();

@@ -863,8 +863,8 @@ export default function FAIVConsole() {
   if (authStatusLoading) {
     return (
       <div className="outer-container lock-screen-shell">
-        <div className="lock-window">
-          <div className="lock-title-bar">PASSWORD PROTECTED</div>
+        <div className="retro-window lock-window">
+          <div className="retro-title-bar lock-title-bar">PASSWORD PROTECTED</div>
           <div className="lock-window-body">Initializing access control...</div>
         </div>
       </div>
@@ -882,8 +882,8 @@ export default function FAIVConsole() {
               </pre>
             ))}
           </div>
-          <div className="lock-window">
-            <div className="lock-title-bar">PASSWORD PROTECTED</div>
+          <div className="retro-window lock-window">
+            <div className="retro-title-bar lock-title-bar">PASSWORD PROTECTED</div>
             <div className="lock-window-body">
               <form className="lock-form" onSubmit={handleUnlockSubmit}>
                 <input
