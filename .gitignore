@@ -9,3 +9,7 @@ faiv-console/node_modules/
 *.log.*
 tmp/
 .DS_Store
+
+# local secrets
+.env.local
+.env
