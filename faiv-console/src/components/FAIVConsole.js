@@ -363,6 +363,7 @@ export default function FAIVConsole() {
   const [unlockPassword, setUnlockPassword] = useState("");
   const [unlockSubmitting, setUnlockSubmitting] = useState(false);
   const [unlockError, setUnlockError] = useState("");
+  const [lockAsciiFrame, setLockAsciiFrame] = useState(0);
 
   // Store deliberation text per message index (persisted in localStorage)
   const [deliberations, setDeliberations] = useState(() => {
@@ -481,6 +482,17 @@ export default function FAIVConsole() {
       setUnlockSubmitting(false);
     }
   }
+
+  useEffect(() => {
+    if (!(passwordProtected && !isUnlocked)) {
+      setLockAsciiFrame(0);
+      return;
+    }
+    const interval = setInterval(() => {
+      setLockAsciiFrame((prev) => (prev + 1) % asciiFAIVFrames.length);
+    }, 320);
+    return () => clearInterval(interval);
+  }, [passwordProtected, isUnlocked]);
 
   // 2) On mount => load existing sessions from localStorage
   useEffect(() => {
@@ -862,11 +874,13 @@ export default function FAIVConsole() {
     return (
       <div className="outer-container lock-screen-shell">
         <div className="lock-stack">
-          <img
-            src={`${API_BASE}/static/faiv_ascii_logo.gif`}
-            alt="FAIV ASCII animated logo"
-            className="lock-gif"
-          />
+          <div className="lock-ascii-wrap" aria-hidden="true">
+            {asciiFAIVFrames[lockAsciiFrame].map((line, i) => (
+              <pre key={i} className="lock-ascii-line">
+                {line}
+              </pre>
+            ))}
+          </div>
           <div className="lock-window">
             <div className="lock-title-bar">PASSWORD PROTECTED</div>
             <div className="lock-window-body">

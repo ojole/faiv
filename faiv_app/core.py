@@ -752,7 +752,6 @@ async def global_exception_handler(request: Request, exc: Exception):
 
 @fastapi_app.get("/locked", response_class=HTMLResponse)
 async def locked_screen():
-    gif_path = "/static/faiv_ascii_logo.gif"
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -785,17 +784,26 @@ async def locked_screen():
       display: flex;
       flex-direction: column;
       align-items: center;
-      gap: 16px;
+      gap: 12px;
     }}
-    .ascii-gif {{
-      width: min(92vw, 640px);
-      image-rendering: pixelated;
+    .ascii-logo {{
+      margin: 0;
+      padding: 8px 12px;
+      min-width: min(92vw, 470px);
       border: 2px solid var(--line-dim);
-      box-shadow: 0 0 26px rgba(0, 255, 102, 0.18), inset 0 0 14px rgba(0, 255, 102, 0.1);
       background: #000;
+      color: var(--line);
+      box-shadow: 0 0 26px rgba(0, 255, 102, 0.18), inset 0 0 14px rgba(0, 255, 102, 0.1);
+      font-family: "Courier New", ui-monospace, Menlo, Monaco, monospace;
+      font-size: clamp(9px, 1.8vw, 14px);
+      line-height: 1.15;
+      letter-spacing: 0.02em;
+      white-space: pre;
+      text-align: left;
+      overflow: hidden;
     }}
     .window {{
-      width: min(92vw, 420px);
+      width: min(92vw, 360px);
       border: 2px solid var(--line);
       background: var(--panel);
       box-shadow: 0 0 18px rgba(0, 255, 102, 0.28);
@@ -857,7 +865,7 @@ async def locked_screen():
 <body>
   <div class="shell">
     <div class="stack">
-      <img src="{gif_path}" alt="FAIV ASCII animated logo" class="ascii-gif" />
+      <pre id="ascii-logo" class="ascii-logo" aria-hidden="true"></pre>
       <div class="window">
         <div class="title">PASSWORD PROTECTED</div>
         <div class="body">
@@ -878,8 +886,43 @@ async def locked_screen():
     const passwordInput = document.getElementById('password');
     const unlockBtn = document.getElementById('unlock-btn');
     const errorEl = document.getElementById('error');
+    const asciiLogo = document.getElementById('ascii-logo');
     const params = new URLSearchParams(window.location.search);
     const nextTarget = params.get('next') || '/';
+    const asciiFAIVFrames = [
+      [
+        "███████╗ █████╗ ██╗██╗   ██╗",
+        "██╔════╝██╔══██╗██║██║   ██║",
+        "█████╗  ███████║██║██║   ██║",
+        "██╔══╝  ██╔══██║██║╚██╗ ██╔╝",
+        "██║     ██║  ██║██║ ╚████╔╝ ",
+        "╚═╝     ╚═╝  ╚═╝╚═╝  ╚═══╝  ",
+      ],
+      [
+        " ██████╗ █████╗ ██╗██╗   ██╗",
+        "██╔════╝██╔══██╗██║██║   ██║",
+        "█████╗  ███████║██║██║   ██║",
+        "██╔══╝  ██╔══██║██║╚██╗ ██╔╝",
+        "██║     ██║  ██║██║ ╚████╔╝",
+        "╚═╝     ██╔═╝  ╚═╝╚═╝  ╚═══╝ ",
+      ],
+      [
+        "  ██████╗ █████╗ ██╗██╗   ██╗",
+        " ██╔════╝██╔══██╗██║██║   ██║",
+        " █████╗  ███████║██║██║   ██║",
+        " ██╔══╝  ██╔══██║██║╚██╗ ██╔╝",
+        " ██║     ██║  ██║██║ ╚████╔╝ ",
+        " ╚═╝     ██╔═╝  ╚═╝╚═╝  ╚═══╝  ",
+      ],
+    ];
+    let asciiFrameIndex = 0;
+    function renderAsciiFrame() {{
+      if (!asciiLogo) return;
+      asciiLogo.textContent = asciiFAIVFrames[asciiFrameIndex].join('\\n');
+      asciiFrameIndex = (asciiFrameIndex + 1) % asciiFAIVFrames.length;
+    }}
+    renderAsciiFrame();
+    setInterval(renderAsciiFrame, 320);
 
     form.addEventListener('submit', async (event) => {{
       event.preventDefault();
