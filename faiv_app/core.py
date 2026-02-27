@@ -145,7 +145,7 @@ def _set_auth_cookie(response, request: Request) -> None:
 
 
 def _public_path(path: str) -> bool:
-    if path in {"/locked", "/api/unlock", "/health", "/openapi.json", "/docs", "/redoc"}:
+    if path in {"/locked", "/api/unlock", "/api/auth-status", "/health", "/openapi.json", "/docs", "/redoc"}:
         return True
     if path.startswith("/static/"):
         return True
@@ -171,6 +171,8 @@ def is_disallowed_prompt(text: str) -> bool:
         re.compile(r"\b(?:minor|child|underage)\b.{0,28}\b(?:sexual|sex)\b", re.IGNORECASE),
         re.compile(r"\b(?:groom|grooming)\b.{0,20}\b(?:child|minor|underage)\b", re.IGNORECASE),
         re.compile(r"\b(?:nude|explicit|porn)\b.{0,28}\b(?:child|minor|underage)\b", re.IGNORECASE),
+        re.compile(r"\b(?:child|minor|underage)\b.{0,28}\b(?:nude|explicit|porn)\b", re.IGNORECASE),
+        re.compile(r"\b(?:underage|minor)\s+explicit\s+content\b", re.IGNORECASE),
     ]
     return any(pattern.search(normalized) for pattern in disallowed_patterns)
 
@@ -923,6 +925,14 @@ async def unlock_endpoint(payload: UnlockRequest, request: Request):
     response = JSONResponse({"status": "ok", "unlocked": True})
     _set_auth_cookie(response, request)
     return response
+
+
+@fastapi_app.get("/api/auth-status")
+async def auth_status(request: Request):
+    return {
+        "passwordProtected": bool(SITE_PASSWORD),
+        "authenticated": request.cookies.get(AUTH_COOKIE_NAME) == "1",
+    }
 
 
 @fastapi_app.get("/", response_class=HTMLResponse)

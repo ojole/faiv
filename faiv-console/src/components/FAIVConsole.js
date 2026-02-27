@@ -357,6 +357,12 @@ export default function FAIVConsole() {
 
   // API health status
   const [apiStatus, setApiStatus] = useState("checking"); // "ok" | "down" | "checking"
+  const [authStatusLoading, setAuthStatusLoading] = useState(true);
+  const [passwordProtected, setPasswordProtected] = useState(false);
+  const [isUnlocked, setIsUnlocked] = useState(false);
+  const [unlockPassword, setUnlockPassword] = useState("");
+  const [unlockSubmitting, setUnlockSubmitting] = useState(false);
+  const [unlockError, setUnlockError] = useState("");
 
   // Store deliberation text per message index (persisted in localStorage)
   const [deliberations, setDeliberations] = useState(() => {
@@ -390,6 +396,42 @@ export default function FAIVConsole() {
     if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
   }
 
+  useEffect(() => {
+    let alive = true;
+
+    async function checkAuthStatus() {
+      try {
+        const resp = await fetch(`${API_BASE}/api/auth-status`, {
+          credentials: "include",
+        });
+        if (!alive) return;
+        if (!resp.ok) {
+          setPasswordProtected(true);
+          setIsUnlocked(false);
+          return;
+        }
+        const data = await resp.json();
+        const protectedMode = Boolean(data?.passwordProtected);
+        const authenticated = Boolean(data?.authenticated);
+        setPasswordProtected(protectedMode);
+        setIsUnlocked(!protectedMode || authenticated);
+        setUnlockError("");
+      } catch {
+        if (!alive) return;
+        // Fail open for UX if auth-status endpoint is unreachable.
+        setPasswordProtected(false);
+        setIsUnlocked(true);
+      } finally {
+        if (alive) setAuthStatusLoading(false);
+      }
+    }
+
+    checkAuthStatus();
+    return () => {
+      alive = false;
+    };
+  }, []);
+
   // Health check on mount + periodic
   useEffect(() => {
     async function checkHealth() {
@@ -410,6 +452,35 @@ export default function FAIVConsole() {
     const interval = setInterval(checkHealth, 30000);
     return () => clearInterval(interval);
   }, []);
+
+  async function handleUnlockSubmit(e) {
+    e.preventDefault();
+    if (!unlockPassword.trim()) return;
+    setUnlockSubmitting(true);
+    setUnlockError("");
+    try {
+      const resp = await fetch(`${API_BASE}/api/unlock`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ password: unlockPassword }),
+      });
+
+      if (!resp.ok) {
+        const payload = await resp.json().catch(() => ({}));
+        setUnlockError(payload.error || "Unlock failed.");
+        return;
+      }
+
+      setIsUnlocked(true);
+      setUnlockPassword("");
+      setApiStatus("ok");
+    } catch {
+      setUnlockError("Unable to reach unlock endpoint.");
+    } finally {
+      setUnlockSubmitting(false);
+    }
+  }
 
   // 2) On mount => load existing sessions from localStorage
   useEffect(() => {
@@ -776,6 +847,50 @@ export default function FAIVConsole() {
   /****************************************
    * RENDER
    ****************************************/
+  if (authStatusLoading) {
+    return (
+      <div className="outer-container lock-screen-shell">
+        <div className="lock-window">
+          <div className="lock-title-bar">PASSWORD PROTECTED</div>
+          <div className="lock-window-body">Initializing access control...</div>
+        </div>
+      </div>
+    );
+  }
+
+  if (passwordProtected && !isUnlocked) {
+    return (
+      <div className="outer-container lock-screen-shell">
+        <div className="lock-stack">
+          <img
+            src={`${API_BASE}/static/faiv_ascii_logo.gif`}
+            alt="FAIV ASCII animated logo"
+            className="lock-gif"
+          />
+          <div className="lock-window">
+            <div className="lock-title-bar">PASSWORD PROTECTED</div>
+            <div className="lock-window-body">
+              <form className="lock-form" onSubmit={handleUnlockSubmit}>
+                <input
+                  type="password"
+                  className="lock-input"
+                  value={unlockPassword}
+                  onChange={(event) => setUnlockPassword(event.target.value)}
+                  placeholder="Enter access password..."
+                  autoFocus
+                />
+                <button type="submit" className="lock-submit" disabled={unlockSubmitting}>
+                  {unlockSubmitting ? "UNLOCKING..." : "UNLOCK"}
+                </button>
+              </form>
+              <div className="lock-error">{unlockError || "\u00A0"}</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="outer-container">
       <div className="windows-container">

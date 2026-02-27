@@ -983,3 +983,89 @@ body {
     font-size: 11px;
   }
 }
+
+/* =========================================
+   20) Password Gate
+========================================= */
+.lock-screen-shell {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: radial-gradient(circle at center, #031003 0%, #000 72%);
+}
+
+.lock-stack {
+  width: min(96vw, 760px);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+}
+
+.lock-gif {
+  width: 100%;
+  max-width: 700px;
+  border: 2px solid #00aa44;
+  background: #000;
+  image-rendering: pixelated;
+  box-shadow: 0 0 16px rgba(0, 255, 102, 0.3), inset 0 0 12px rgba(0, 255, 102, 0.12);
+}
+
+.lock-window {
+  width: min(96vw, 460px);
+  border: 2px solid #00ff00;
+  background: #000;
+  box-shadow: 0 0 14px rgba(0, 255, 102, 0.35), inset -1px -1px 0 #003300, inset 1px 1px 0 #000;
+}
+
+.lock-title-bar {
+  background: #00ff00;
+  color: #001800;
+  font-size: 14px;
+  font-weight: bold;
+  letter-spacing: 0.08em;
+  padding: 7px 10px;
+}
+
+.lock-window-body {
+  border-top: 2px solid #00ff00;
+  padding: 12px;
+}
+
+.lock-form {
+  display: flex;
+  gap: 8px;
+}
+
+.lock-input {
+  flex: 1;
+  background: #000;
+  color: #00ff00;
+  border: 2px solid #00ff00;
+  font-family: "Courier New", monospace;
+  font-size: 14px;
+  padding: 6px 8px;
+}
+
+.lock-submit {
+  background: #003500;
+  color: #00ff00;
+  border: 2px solid #00ff00;
+  font-family: "Courier New", monospace;
+  font-weight: bold;
+  font-size: 13px;
+  padding: 6px 10px;
+  cursor: pointer;
+}
+
+.lock-submit:disabled {
+  opacity: 0.7;
+  cursor: default;
+}
+
+.lock-error {
+  margin-top: 10px;
+  min-height: 18px;
+  color: #ff7f9d;
+  font-size: 12px;
+}
