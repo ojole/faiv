@@ -1,0 +1,70 @@
+name: Deploy to cPanel
+
+on:
+  push:
+    branches:
+      - main
+      - production/v1.0
+  workflow_dispatch:
+
+concurrency:
+  group: cpanel-production-deploy
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      FTP_HOST: ${{ secrets.CPANEL_FTP_HOST }}
+      FTP_PORT: ${{ secrets.CPANEL_FTP_PORT }}
+      FTP_USER: ${{ secrets.CPANEL_FTP_USER }}
+      FTP_PASSWORD: ${{ secrets.CPANEL_FTP_PASSWORD }}
+      BACKEND_DIR: ${{ secrets.CPANEL_BACKEND_DIR || 'api' }}
+      FRONTEND_DIR: ${{ secrets.CPANEL_FRONTEND_DIR || 'public_html' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: faiv-console/package-lock.json
+
+      - name: Build frontend
+        run: |
+          npm ci --prefix faiv-console
+          REACT_APP_API_BASE_URL=https://api.faiv.ai npm run build --prefix faiv-console
+
+      - name: Install lftp
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y lftp
+
+      - name: Validate deploy secrets
+        run: |
+          set -euo pipefail
+          : "${FTP_HOST:?Missing CPANEL_FTP_HOST}"
+          : "${FTP_PORT:?Missing CPANEL_FTP_PORT}"
+          : "${FTP_USER:?Missing CPANEL_FTP_USER}"
+          : "${FTP_PASSWORD:?Missing CPANEL_FTP_PASSWORD}"
+
+      - name: Upload frontend + backend and restart Passenger
+        run: |
+          set -euo pipefail
+          printf 'restart %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" > /tmp/restart.txt
+
+          lftp -e "
+            set net:max-retries 2;
+            set net:timeout 20;
+            set ssl:verify-certificate no;
+            set xfer:clobber yes;
+            open -u $FTP_USER,$FTP_PASSWORD -p $FTP_PORT ftp://$FTP_HOST;
+            mirror -R --delete --verbose=1 faiv-console/build $FRONTEND_DIR;
+            mirror -R --delete --verbose=1 --exclude-glob __pycache__/ --exclude-glob *.pyc faiv_app $BACKEND_DIR/faiv_app;
+            put -O $BACKEND_DIR passenger_wsgi.py;
+            put -O $BACKEND_DIR requirements.txt;
+            put -O $BACKEND_DIR/tmp /tmp/restart.txt -o restart.txt;
+            bye
+          "
