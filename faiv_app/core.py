@@ -8,6 +8,7 @@ import uuid
 from pathlib import Path
 from datetime import datetime, timezone
 from urllib.parse import quote
+from urllib.parse import urlparse
 from openai import OpenAI
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -19,6 +20,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from faiv_app.identity_codex import FAIV_IDENTITY_CODEX
 from faiv_app.embed_auth import (
     EMBED_COOKIE_NAME,
+    issue_embed_token,
     set_embed_cookie,
     verify_embed_cookie,
     verify_token,
@@ -153,7 +155,17 @@ def _set_auth_cookie(response, request: Request) -> None:
 
 
 def _public_path(path: str) -> bool:
-    if path in {"/locked", "/embed", "/api/unlock", "/api/auth-status", "/health", "/openapi.json", "/docs", "/redoc"}:
+    if path in {
+        "/locked",
+        "/embed",
+        "/api/unlock",
+        "/api/auth-status",
+        "/api/faiv-embed-token",
+        "/health",
+        "/openapi.json",
+        "/docs",
+        "/redoc",
+    }:
         return True
     if path.startswith("/static/"):
         return True
@@ -194,6 +206,22 @@ def _apply_frame_headers(response) -> None:
         del response.headers["x-frame-options"]
     existing_csp = response.headers.get("content-security-policy")
     response.headers["content-security-policy"] = _merge_frame_ancestors(existing_csp)
+
+
+def _is_allowed_embed_origin(request: Request) -> bool:
+    allowed_hosts = {"jol3.com", "www.jol3.com", "localhost", "127.0.0.1"}
+    for header in ("origin", "referer"):
+        raw_value = request.headers.get(header, "").strip()
+        if not raw_value:
+            continue
+        try:
+            parsed = urlparse(raw_value)
+        except Exception:
+            continue
+        hostname = (parsed.hostname or "").lower()
+        if hostname in allowed_hosts:
+            return True
+    return False
 
 
 def is_disallowed_prompt(text: str) -> bool:
@@ -729,6 +757,8 @@ fastapi_app.add_middleware(
     allow_origins=[
         "https://faiv.ai",
         "https://www.faiv.ai",
+        "https://jol3.com",
+        "https://www.jol3.com",
         "http://localhost:3000",
         "http://127.0.0.1:3000",
     ],
@@ -1029,6 +1059,39 @@ async def embed_launch(request: Request, token: Optional[str] = None):
         return response
 
     return HTMLResponse(content=await locked_screen())
+
+
+@fastapi_app.get("/api/faiv-embed-token")
+async def issue_faiv_embed_token(request: Request):
+    if not _is_allowed_embed_origin(request):
+        return JSONResponse(
+            status_code=403,
+            content={"error": "Forbidden origin."},
+            headers={"Cache-Control": "no-store"},
+        )
+
+    visitor_id = request.cookies.get(VISITOR_COOKIE_NAME) or str(uuid.uuid4())
+    if not rate_limit_ok(visitor_id):
+        return JSONResponse(
+            status_code=429,
+            content={"error": "Too many requests. Try again shortly."},
+            headers={"Cache-Control": "no-store"},
+        )
+
+    try:
+        token = issue_embed_token()
+    except Exception as ex:
+        logger.error(f"Failed to mint embed token: {ex}")
+        return JSONResponse(
+            status_code=500,
+            content={"error": "Embed token unavailable."},
+            headers={"Cache-Control": "no-store"},
+        )
+
+    return JSONResponse(
+        content={"token": token, "embedBaseUrl": EMBED_APP_URL},
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @fastapi_app.post("/api/unlock")
