@@ -17,6 +17,12 @@ from typing import Optional
 from fastapi.middleware.cors import CORSMiddleware
 
 from faiv_app.identity_codex import FAIV_IDENTITY_CODEX
+from faiv_app.embed_auth import (
+    EMBED_COOKIE_NAME,
+    set_embed_cookie,
+    verify_embed_cookie,
+    verify_token,
+)
 
 ################################################
 # 1) Logging & Redis (with in-memory fallback)
@@ -57,6 +63,8 @@ VISITOR_COOKIE_MAX_AGE = 60 * 60 * 24 * 365
 AUTH_COOKIE_MAX_AGE = 60 * 60 * 24 * 7
 RATE_LIMIT_PER_MINUTE = int(os.getenv("FAIV_RATE_LIMIT_PER_MINUTE", "10"))
 ENABLE_OPENAI_MODERATION_GATE = _env_flag("FAIV_ENABLE_MODERATION_GATE", default=False)
+EMBED_APP_URL = (os.getenv("FAIV_EMBED_APP_URL") or "https://faiv.ai").strip() or "https://faiv.ai"
+FRAME_ANCESTORS_VALUE = "frame-ancestors 'self' https://jol3.com https://www.jol3.com"
 
 # In-memory rate-limit fallback when Redis is unavailable
 _memory_rate_limits = {}
@@ -145,7 +153,7 @@ def _set_auth_cookie(response, request: Request) -> None:
 
 
 def _public_path(path: str) -> bool:
-    if path in {"/locked", "/api/unlock", "/api/auth-status", "/health", "/openapi.json", "/docs", "/redoc"}:
+    if path in {"/locked", "/embed", "/api/unlock", "/api/auth-status", "/health", "/openapi.json", "/docs", "/redoc"}:
         return True
     if path.startswith("/static/"):
         return True
@@ -154,6 +162,38 @@ def _public_path(path: str) -> bool:
 
 def _api_path(path: str) -> bool:
     return path.startswith("/query") or path.startswith("/redeliberate") or path.startswith("/reset")
+
+
+def _has_valid_embed_cookie(request: Request) -> bool:
+    embed_cookie = request.cookies.get(EMBED_COOKIE_NAME, "")
+    return verify_embed_cookie(embed_cookie)
+
+
+def _is_request_authenticated(request: Request) -> bool:
+    return request.cookies.get(AUTH_COOKIE_NAME) == "1" or _has_valid_embed_cookie(request)
+
+
+def _merge_frame_ancestors(existing_csp: Optional[str]) -> str:
+    if not existing_csp:
+        return FRAME_ANCESTORS_VALUE
+
+    if "frame-ancestors" in existing_csp.lower():
+        return re.sub(
+            r"frame-ancestors[^;]*",
+            FRAME_ANCESTORS_VALUE,
+            existing_csp,
+            flags=re.IGNORECASE,
+        )
+
+    separator = "" if existing_csp.strip().endswith(";") else "; "
+    return f"{existing_csp}{separator}{FRAME_ANCESTORS_VALUE}"
+
+
+def _apply_frame_headers(response) -> None:
+    if "x-frame-options" in response.headers:
+        del response.headers["x-frame-options"]
+    existing_csp = response.headers.get("content-security-policy")
+    response.headers["content-security-policy"] = _merge_frame_ancestors(existing_csp)
 
 
 def is_disallowed_prompt(text: str) -> bool:
@@ -712,7 +752,7 @@ async def faiv_security_middleware(request: Request, call_next):
 
     path = request.url.path
     if SITE_PASSWORD and request.method != "OPTIONS" and not _public_path(path):
-        if request.cookies.get(AUTH_COOKIE_NAME) != "1":
+        if not _is_request_authenticated(request):
             if _api_path(path):
                 response = JSONResponse(
                     status_code=401,
@@ -728,11 +768,13 @@ async def faiv_security_middleware(request: Request, call_next):
                 )
             if has_new_visitor_cookie:
                 _set_visitor_cookie(response, request, visitor_id)
+            _apply_frame_headers(response)
             return response
 
     response = await call_next(request)
     if has_new_visitor_cookie:
         _set_visitor_cookie(response, request, visitor_id)
+    _apply_frame_headers(response)
     return response
 
 
@@ -976,6 +1018,19 @@ async def locked_screen():
 </html>"""
 
 
+@fastapi_app.get("/embed")
+async def embed_launch(request: Request, token: Optional[str] = None):
+    if _has_valid_embed_cookie(request):
+        return RedirectResponse(url=EMBED_APP_URL, status_code=302)
+
+    if token and verify_token(token):
+        response = RedirectResponse(url=EMBED_APP_URL, status_code=302)
+        set_embed_cookie(response, secure=_cookie_secure(request))
+        return response
+
+    return await locked_screen()
+
+
 @fastapi_app.post("/api/unlock")
 async def unlock_endpoint(payload: UnlockRequest, request: Request):
     if not SITE_PASSWORD:
@@ -996,9 +1051,11 @@ async def unlock_endpoint(payload: UnlockRequest, request: Request):
 
 @fastapi_app.get("/api/auth-status")
 async def auth_status(request: Request):
+    embed_authenticated = _has_valid_embed_cookie(request)
     return {
         "passwordProtected": bool(SITE_PASSWORD),
-        "authenticated": request.cookies.get(AUTH_COOKIE_NAME) == "1",
+        "authenticated": request.cookies.get(AUTH_COOKIE_NAME) == "1" or embed_authenticated,
+        "embedAuthenticated": embed_authenticated,
     }
 
 

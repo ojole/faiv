@@ -1,3 +1,11 @@
 RewriteEngine On
 RewriteCond %{HTTPS} off
 RewriteRule ^(.*)$ https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]
+
+# Launch FAIV embed flow through API backend so token can be verified server-side.
+RewriteRule ^embed/?$ https://api.faiv.ai/embed [R=302,L,QSA]
+
+# SPA fallback
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteRule ^ index.html [L]
