@@ -21,6 +21,11 @@ jobs:
       FTP_PASSWORD: ${{ secrets.CPANEL_FTP_PASSWORD }}
       BACKEND_DIR: ${{ secrets.CPANEL_BACKEND_DIR || 'api' }}
       FRONTEND_DIR: ${{ secrets.CPANEL_FRONTEND_DIR || 'public_html' }}
+      OPENAI_API_KEY: ${{ secrets.FAIV_OPENAI_API_KEY || secrets.OPENAI_API_KEY }}
+      FAIV_SITE_PASSWORD: ${{ secrets.FAIV_SITE_PASSWORD }}
+      FAIV_EMBED_SECRET: ${{ secrets.FAIV_EMBED_SECRET }}
+      FAIV_EMBED_APP_URL: ${{ secrets.FAIV_EMBED_APP_URL || 'https://faiv.ai' }}
+      FAIV_ENV: production
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -49,6 +54,19 @@ jobs:
           : "${FTP_PORT:?Missing CPANEL_FTP_PORT}"
           : "${FTP_USER:?Missing CPANEL_FTP_USER}"
           : "${FTP_PASSWORD:?Missing CPANEL_FTP_PASSWORD}"
+          : "${OPENAI_API_KEY:?Missing FAIV_OPENAI_API_KEY or OPENAI_API_KEY}"
+
+      - name: Build backend env file
+        run: |
+          set -euo pipefail
+          {
+            echo "OPENAI_API_KEY=${OPENAI_API_KEY}"
+            echo "FAIV_ENV=${FAIV_ENV}"
+            if [ -n "${FAIV_SITE_PASSWORD:-}" ]; then echo "FAIV_SITE_PASSWORD=${FAIV_SITE_PASSWORD}"; fi
+            if [ -n "${FAIV_EMBED_SECRET:-}" ]; then echo "FAIV_EMBED_SECRET=${FAIV_EMBED_SECRET}"; fi
+            if [ -n "${FAIV_EMBED_APP_URL:-}" ]; then echo "FAIV_EMBED_APP_URL=${FAIV_EMBED_APP_URL}"; fi
+          } > /tmp/faiv.env.local
+          chmod 600 /tmp/faiv.env.local
 
       - name: Upload frontend + backend and restart Passenger
         run: |
@@ -65,6 +83,7 @@ jobs:
             mirror -R --delete --verbose=1 --exclude-glob __pycache__/ --exclude-glob *.pyc faiv_app $BACKEND_DIR/faiv_app;
             put -O $BACKEND_DIR passenger_wsgi.py;
             put -O $BACKEND_DIR requirements.txt;
+            put -O $BACKEND_DIR /tmp/faiv.env.local -o .env.local;
             put -O $BACKEND_DIR/tmp /tmp/restart.txt -o restart.txt;
             bye
           "
