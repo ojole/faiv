@@ -33,14 +33,16 @@ from faiv_app.embed_auth import (
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-# Load local env files when present (cPanel/host env vars still take precedence).
+# Load env files with explicit precedence:
+# 1) .env as baseline defaults
+# 2) .env.local as secret/local overrides
 BASE_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = BASE_DIR.parent
 try:
     from dotenv import load_dotenv
 
-    load_dotenv(PROJECT_ROOT / ".env.local", override=False)
     load_dotenv(PROJECT_ROOT / ".env", override=False)
+    load_dotenv(PROJECT_ROOT / ".env.local", override=True)
 except Exception as env_ex:
     logger.warning(f"python-dotenv load skipped: {env_ex}")
 
@@ -673,6 +675,21 @@ def extract_faiv_final_output(text: str, pillar: str = "FAIV") -> str:
     return "\n".join(lines)
 
 
+def _is_openai_api_error(parsed_output: str) -> bool:
+    return isinstance(parsed_output, str) and parsed_output.startswith("OpenAI API Error:")
+
+
+def _humanize_openai_error(parsed_output: str) -> str:
+    if not parsed_output:
+        return "OpenAI API Error."
+    lowered = parsed_output.lower()
+    if "invalid_api_key" in lowered or "incorrect api key provided" in lowered:
+        return "OpenAI API Error: invalid OPENAI_API_KEY configuration."
+    if "api key is not set" in lowered:
+        return "OpenAI API Error: OPENAI_API_KEY is not set."
+    return parsed_output
+
+
 ################################################
 # 5) The function that calls OpenAI
 ################################################
@@ -1229,6 +1246,17 @@ async def query_faiv_endpoint(payload: QueryRequest, request: Request):
         )
         council = {name: data["pillar"] for name, data in selected_members.items()}
 
+        if _is_openai_api_error(parsed):
+            logger.error("OpenAI query failed for session_id=%s: %s", session_id, parsed)
+            return {
+                "status": "OpenAI API Error",
+                "response": _humanize_openai_error(parsed),
+                "pillar": chosen_pillar,
+                "session_id": session_id,
+                "deliberation": deliberation if deliberation else None,
+                "council": council,
+            }
+
         if "Consensus:" not in parsed:
             logger.warning("No valid consensus found. Resetting session.")
             session_delete(session_id)
@@ -1426,6 +1454,17 @@ async def redeliberate_endpoint(payload: RedeliberateRequest, request: Request):
             safety_id=visitor_id,
         )
         council = {name: data["pillar"] for name, data in selected_members.items()}
+
+        if _is_openai_api_error(parsed):
+            logger.error("OpenAI re-deliberation failed for session_id=%s: %s", session_id, parsed)
+            return {
+                "status": "OpenAI API Error",
+                "response": _humanize_openai_error(parsed),
+                "pillar": chosen_pillar,
+                "session_id": session_id,
+                "deliberation": deliberation if deliberation else None,
+                "council": council,
+            }
 
         if "Consensus:" not in parsed:
             return {
