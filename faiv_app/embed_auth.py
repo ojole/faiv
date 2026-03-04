@@ -6,7 +6,7 @@ import os
 import threading
 import time
 import uuid
-from typing import Optional
+from typing import Dict, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -17,7 +17,7 @@ EMBED_NONCE_PREFIX = "faiv:embed:nonce"
 EMBED_TOKEN_TTL_SECONDS = int(os.getenv("FAIV_EMBED_TOKEN_TTL_SECONDS", "60"))
 EMBED_COOKIE_MAX_AGE_SECONDS = int(os.getenv("FAIV_EMBED_COOKIE_MAX_AGE_SECONDS", "3600"))
 
-_memory_nonce_cache: dict[str, float] = {}
+_memory_nonce_cache: Dict[str, float] = {}
 _memory_nonce_lock = threading.Lock()
 
 _redis_client = None
@@ -182,4 +182,3 @@ def set_embed_cookie(response, secure: bool, secret: Optional[str] = None) -> No
         path="/",
         max_age=EMBED_COOKIE_MAX_AGE_SECONDS,
     )
-
