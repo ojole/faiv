@@ -1018,7 +1018,7 @@ async def locked_screen():
 </html>"""
 
 
-@fastapi_app.get("/embed")
+@fastapi_app.get("/embed", response_class=HTMLResponse)
 async def embed_launch(request: Request, token: Optional[str] = None):
     if _has_valid_embed_cookie(request):
         return RedirectResponse(url=EMBED_APP_URL, status_code=302)
@@ -1028,7 +1028,7 @@ async def embed_launch(request: Request, token: Optional[str] = None):
         set_embed_cookie(response, secure=_cookie_secure(request))
         return response
 
-    return await locked_screen()
+    return HTMLResponse(content=await locked_screen())
 
 
 @fastapi_app.post("/api/unlock")
