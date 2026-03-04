@@ -20,6 +20,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from faiv_app.identity_codex import FAIV_IDENTITY_CODEX
 from faiv_app.embed_auth import (
     EMBED_COOKIE_NAME,
+    create_embed_cookie_value,
     issue_embed_token,
     set_embed_cookie,
     verify_embed_cookie,
@@ -67,6 +68,8 @@ RATE_LIMIT_PER_MINUTE = int(os.getenv("FAIV_RATE_LIMIT_PER_MINUTE", "10"))
 ENABLE_OPENAI_MODERATION_GATE = _env_flag("FAIV_ENABLE_MODERATION_GATE", default=False)
 EMBED_APP_URL = (os.getenv("FAIV_EMBED_APP_URL") or "https://faiv.ai").strip() or "https://faiv.ai"
 FRAME_ANCESTORS_VALUE = "frame-ancestors 'self' https://jol3.com https://www.jol3.com"
+EMBED_SESSION_HEADER = "x-faiv-embed-session"
+EMBED_SESSION_QUERY_PARAM = "embed_session"
 
 # In-memory rate-limit fallback when Redis is unavailable
 _memory_rate_limits = {}
@@ -181,8 +184,31 @@ def _has_valid_embed_cookie(request: Request) -> bool:
     return verify_embed_cookie(embed_cookie)
 
 
+def _extract_embed_session_token(request: Request) -> str:
+    header_value = request.headers.get(EMBED_SESSION_HEADER, "").strip()
+    if header_value:
+        return header_value
+    return request.query_params.get(EMBED_SESSION_QUERY_PARAM, "").strip()
+
+
+def _has_valid_embed_session(request: Request) -> bool:
+    embed_session = _extract_embed_session_token(request)
+    return bool(embed_session and verify_embed_cookie(embed_session))
+
+
 def _is_request_authenticated(request: Request) -> bool:
-    return request.cookies.get(AUTH_COOKIE_NAME) == "1" or _has_valid_embed_cookie(request)
+    if request.cookies.get(AUTH_COOKIE_NAME) == "1":
+        return True
+    if _has_valid_embed_cookie(request):
+        return True
+    return _has_valid_embed_session(request)
+
+
+def _embed_cookie_domain(request: Request) -> Optional[str]:
+    host = (request.url.hostname or "").lower()
+    if host.endswith("faiv.ai"):
+        return ".faiv.ai"
+    return None
 
 
 def _merge_frame_ancestors(existing_csp: Optional[str]) -> str:
@@ -1054,8 +1080,16 @@ async def embed_launch(request: Request, token: Optional[str] = None):
         return RedirectResponse(url=EMBED_APP_URL, status_code=302)
 
     if token and verify_token(token):
-        response = RedirectResponse(url=EMBED_APP_URL, status_code=302)
-        set_embed_cookie(response, secure=_cookie_secure(request))
+        embed_session = create_embed_cookie_value()
+        separator = "&" if "?" in EMBED_APP_URL else "?"
+        launch_url = f"{EMBED_APP_URL}{separator}{EMBED_SESSION_QUERY_PARAM}={quote(embed_session, safe='')}"
+        response = RedirectResponse(url=launch_url, status_code=302)
+        set_embed_cookie(
+            response,
+            secure=_cookie_secure(request),
+            cookie_value=embed_session,
+            domain=_embed_cookie_domain(request),
+        )
         return response
 
     return HTMLResponse(content=await locked_screen())
@@ -1114,11 +1148,14 @@ async def unlock_endpoint(payload: UnlockRequest, request: Request):
 
 @fastapi_app.get("/api/auth-status")
 async def auth_status(request: Request):
-    embed_authenticated = _has_valid_embed_cookie(request)
+    embed_cookie_authenticated = _has_valid_embed_cookie(request)
+    embed_session_authenticated = _has_valid_embed_session(request)
+    authenticated = request.cookies.get(AUTH_COOKIE_NAME) == "1" or embed_cookie_authenticated or embed_session_authenticated
     return {
         "passwordProtected": bool(SITE_PASSWORD),
-        "authenticated": request.cookies.get(AUTH_COOKIE_NAME) == "1" or embed_authenticated,
-        "embedAuthenticated": embed_authenticated,
+        "authenticated": authenticated,
+        "embedAuthenticated": embed_cookie_authenticated,
+        "embedSessionAuthenticated": embed_session_authenticated,
     }
 
 

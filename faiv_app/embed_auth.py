@@ -171,14 +171,21 @@ def verify_embed_cookie(cookie_value: str, secret: Optional[str] = None, max_age
     return hmac.compare_digest(signature, expected_signature)
 
 
-def set_embed_cookie(response, secure: bool, secret: Optional[str] = None) -> None:
-    cookie_value = create_embed_cookie_value(secret=secret)
+def set_embed_cookie(
+    response,
+    secure: bool,
+    secret: Optional[str] = None,
+    cookie_value: Optional[str] = None,
+    domain: Optional[str] = None,
+) -> None:
+    value = cookie_value or create_embed_cookie_value(secret=secret)
     response.set_cookie(
         key=EMBED_COOKIE_NAME,
-        value=cookie_value,
+        value=value,
         httponly=True,
         secure=secure,
         samesite="none",
         path="/",
         max_age=EMBED_COOKIE_MAX_AGE_SECONDS,
+        domain=domain,
     )

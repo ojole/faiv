@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 import "./FAIVConsole.css";
 
 /****************************************
@@ -364,6 +364,15 @@ export default function FAIVConsole() {
   const [unlockSubmitting, setUnlockSubmitting] = useState(false);
   const [unlockError, setUnlockError] = useState("");
   const [lockAsciiFrame, setLockAsciiFrame] = useState(0);
+  const [embedSessionToken, setEmbedSessionToken] = useState(() => {
+    try {
+      if (typeof window === "undefined") return "";
+      const params = new URLSearchParams(window.location.search);
+      return params.get("embed_session") || sessionStorage.getItem("faiv_embed_session") || "";
+    } catch {
+      return "";
+    }
+  });
 
   // Store deliberation text per message index (persisted in localStorage)
   const [deliberations, setDeliberations] = useState(() => {
@@ -397,12 +406,42 @@ export default function FAIVConsole() {
     if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
   }
 
+  const withEmbedSessionHeader = useCallback((headers = {}) => {
+    if (!embedSessionToken) return headers;
+    return {
+      ...headers,
+      "X-FAIV-Embed-Session": embedSessionToken,
+    };
+  }, [embedSessionToken]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    const embedSessionFromQuery = params.get("embed_session");
+
+    if (embedSessionFromQuery) {
+      sessionStorage.setItem("faiv_embed_session", embedSessionFromQuery);
+      setEmbedSessionToken(embedSessionFromQuery);
+      params.delete("embed_session");
+      const nextQuery = params.toString();
+      const nextUrl = `${window.location.pathname}${nextQuery ? `?${nextQuery}` : ""}${window.location.hash}`;
+      window.history.replaceState({}, document.title, nextUrl);
+      return;
+    }
+
+    const storedSession = sessionStorage.getItem("faiv_embed_session") || "";
+    if (storedSession && storedSession !== embedSessionToken) {
+      setEmbedSessionToken(storedSession);
+    }
+  }, [embedSessionToken]);
+
   useEffect(() => {
     let alive = true;
 
     async function checkAuthStatus() {
       try {
         const resp = await fetch(`${API_BASE}/api/auth-status`, {
+          headers: withEmbedSessionHeader(),
           credentials: "include",
         });
         if (!alive) return;
@@ -432,13 +471,14 @@ export default function FAIVConsole() {
     return () => {
       alive = false;
     };
-  }, []);
+  }, [withEmbedSessionHeader]);
 
   // Health check on mount + periodic
   useEffect(() => {
     async function checkHealth() {
       try {
         const resp = await fetch(`${API_BASE}/health`, {
+          headers: withEmbedSessionHeader(),
           credentials: "include",
         });
         if (resp.ok) {
@@ -453,7 +493,7 @@ export default function FAIVConsole() {
     checkHealth();
     const interval = setInterval(checkHealth, 30000);
     return () => clearInterval(interval);
-  }, []);
+  }, [withEmbedSessionHeader]);
 
   async function handleUnlockSubmit(e) {
     e.preventDefault();
@@ -463,7 +503,7 @@ export default function FAIVConsole() {
     try {
       const resp = await fetch(`${API_BASE}/api/unlock`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        headers: withEmbedSessionHeader({ "Content-Type": "application/json", Accept: "application/json" }),
         credentials: "include",
         body: JSON.stringify({ password: unlockPassword }),
       });
@@ -681,10 +721,10 @@ export default function FAIVConsole() {
     try {
       const resp = await fetch(`${API_BASE}/query/`, {
         method: "POST",
-        headers: {
+        headers: withEmbedSessionHeader({
           "Content-Type": "application/json",
           Accept: "application/json",
-        },
+        }),
         credentials: "include",
         body: JSON.stringify({
           session_id: activeSessionId,
@@ -770,7 +810,7 @@ export default function FAIVConsole() {
     try {
       const resp = await fetch(`${API_BASE}/redeliberate/`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        headers: withEmbedSessionHeader({ "Content-Type": "application/json", Accept: "application/json" }),
         credentials: "include",
         body: JSON.stringify({
           session_id: activeSessionId,
@@ -829,6 +869,7 @@ export default function FAIVConsole() {
     try {
       await fetch(`${API_BASE}/reset/?session_id=${encodeURIComponent(activeSessionId)}`, {
         method: "POST",
+        headers: withEmbedSessionHeader(),
         credentials: "include",
       });
     } catch {
