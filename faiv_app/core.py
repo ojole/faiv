@@ -252,6 +252,28 @@ def _is_allowed_embed_origin(request: Request) -> bool:
     return False
 
 
+def _append_vary_header(response, value: str) -> None:
+    existing = response.headers.get("vary")
+    if not existing:
+        response.headers["vary"] = value
+        return
+    existing_values = {item.strip().lower() for item in existing.split(",") if item.strip()}
+    if value.lower() in existing_values:
+        return
+    response.headers["vary"] = f"{existing}, {value}"
+
+
+def _apply_cors_headers(request: Request, response) -> None:
+    origin = request.headers.get("origin", "").strip()
+    if not origin:
+        return
+    if origin not in ALLOWED_CORS_ORIGINS:
+        return
+    response.headers["access-control-allow-origin"] = origin
+    response.headers["access-control-allow-credentials"] = "true"
+    _append_vary_header(response, "Origin")
+
+
 def is_disallowed_prompt(text: str) -> bool:
     if not text:
         return False
@@ -795,16 +817,17 @@ class UnlockRequest(BaseModel):
 
 
 fastapi_app = FastAPI()
+ALLOWED_CORS_ORIGINS = {
+    "https://faiv.ai",
+    "https://www.faiv.ai",
+    "https://jol3.com",
+    "https://www.jol3.com",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+}
 fastapi_app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "https://faiv.ai",
-        "https://www.faiv.ai",
-        "https://jol3.com",
-        "https://www.jol3.com",
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-    ],
+    allow_origins=sorted(ALLOWED_CORS_ORIGINS),
     allow_credentials=True,
     allow_methods=["OPTIONS", "GET", "POST"],
     allow_headers=["*"],
@@ -841,6 +864,7 @@ async def faiv_security_middleware(request: Request, call_next):
                 )
             if has_new_visitor_cookie:
                 _set_visitor_cookie(response, request, visitor_id)
+            _apply_cors_headers(request, response)
             _apply_frame_headers(response)
             return response
 
@@ -854,7 +878,7 @@ async def faiv_security_middleware(request: Request, call_next):
 @fastapi_app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
     logger.error(f"Unhandled error: {exc}")
-    return JSONResponse(
+    response = JSONResponse(
         status_code=500,
         content={
             "status": "error",
@@ -863,6 +887,9 @@ async def global_exception_handler(request: Request, exc: Exception):
             "session_id": None,
         }
     )
+    _apply_cors_headers(request, response)
+    _apply_frame_headers(response)
+    return response
 
 
 @fastapi_app.get("/locked", response_class=HTMLResponse)

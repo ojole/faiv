@@ -734,6 +734,11 @@ export default function FAIVConsole() {
       });
       if (!resp.ok) {
         const errorBody = await resp.text();
+        if (resp.status === 401) {
+          setPasswordProtected(true);
+          setIsUnlocked(false);
+          setUnlockError("Access session expired. Please unlock again.");
+        }
         throw new Error(`HTTP ${resp.status}: ${errorBody}`);
       }
       const data = await resp.json();
@@ -757,7 +762,10 @@ export default function FAIVConsole() {
       // Refresh health status on success
       setApiStatus("ok");
     } catch (err) {
-      const isNetworkError = err.message === "Failed to fetch";
+      const isNetworkError =
+        err.message === "Failed to fetch" ||
+        err.message === "Load failed" ||
+        err.name === "TypeError";
       const displayMsg = isNetworkError
         ? "Cannot reach FAIV API. Is the backend running?"
         : `API error: ${err.message}`;
@@ -824,6 +832,11 @@ export default function FAIVConsole() {
       });
       if (!resp.ok) {
         const errorBody = await resp.text();
+        if (resp.status === 401) {
+          setPasswordProtected(true);
+          setIsUnlocked(false);
+          setUnlockError("Access session expired. Please unlock again.");
+        }
         throw new Error(`HTTP ${resp.status}: ${errorBody}`);
       }
       const data = await resp.json();
@@ -844,7 +857,10 @@ export default function FAIVConsole() {
       }
       setApiStatus("ok");
     } catch (err) {
-      const isNetworkError = err.message === "Failed to fetch";
+      const isNetworkError =
+        err.message === "Failed to fetch" ||
+        err.message === "Load failed" ||
+        err.name === "TypeError";
       const displayMsg = isNetworkError
         ? "Cannot reach FAIV API."
         : `API error: ${err.message}`;
