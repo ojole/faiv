@@ -83,7 +83,6 @@ jobs:
             mirror -R --delete --verbose=1 --exclude-glob __pycache__/ --exclude-glob *.pyc faiv_app $BACKEND_DIR/faiv_app;
             put -O $BACKEND_DIR passenger_wsgi.py;
             put -O $BACKEND_DIR requirements.txt;
-            put -O $BACKEND_DIR .htaccess;
             put -O $BACKEND_DIR /tmp/faiv.env.local -o .env.local;
             put -O $BACKEND_DIR/tmp /tmp/restart.txt -o restart.txt;
             bye
