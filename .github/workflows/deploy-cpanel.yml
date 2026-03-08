@@ -79,6 +79,7 @@ jobs:
             set ssl:verify-certificate no;
             set xfer:clobber yes;
             open -u $FTP_USER,$FTP_PASSWORD -p $FTP_PORT ftp://$FTP_HOST;
+            rm -f $BACKEND_DIR/.htaccess;
             mirror -R --delete --verbose=1 faiv-console/build $FRONTEND_DIR;
             mirror -R --delete --verbose=1 --exclude-glob __pycache__/ --exclude-glob *.pyc faiv_app $BACKEND_DIR/faiv_app;
             put -O $BACKEND_DIR passenger_wsgi.py;
