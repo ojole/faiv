@@ -6,6 +6,71 @@ import "./FAIVConsole.css";
  ****************************************/
 const API_BASE =
   process.env.REACT_APP_API_BASE_URL || "https://api.faiv.ai";
+const API_RETRY_ATTEMPTS = 4;
+const API_RETRY_DELAY_MS = 400;
+const API_FETCH_TIMEOUT_MS = 45000;
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function isNetworkFetchError(err) {
+  if (!err) return false;
+  const message = String(err.message || "");
+  return (
+    err.name === "AbortError" ||
+    err.name === "TypeError" ||
+    message === "Failed to fetch" ||
+    message === "Load failed" ||
+    /NetworkError/i.test(message)
+  );
+}
+
+function makeRequestId(prefix = "req") {
+  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function getStorageItem(storageObj, key, fallback = "") {
+  try {
+    return storageObj?.getItem(key) ?? fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function setStorageItem(storageObj, key, value) {
+  try {
+    storageObj?.setItem(key, value);
+  } catch {
+    // Some embedded/private browser contexts deny storage writes.
+  }
+}
+
+async function fetchWithRetry(url, options = {}, attempts = API_RETRY_ATTEMPTS) {
+  const { timeoutMs = API_FETCH_TIMEOUT_MS, ...fetchOptions } = options;
+  let lastErr = null;
+  for (let attempt = 0; attempt <= attempts; attempt += 1) {
+    const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+    const timeoutId = controller
+      ? setTimeout(() => controller.abort(), timeoutMs)
+      : null;
+
+    try {
+      return await fetch(url, {
+        ...fetchOptions,
+        signal: controller ? controller.signal : undefined,
+      });
+    } catch (err) {
+      lastErr = err;
+      if (!isNetworkFetchError(err) || attempt >= attempts) {
+        throw err;
+      }
+      const jitter = Math.floor(Math.random() * 200);
+      await sleep(API_RETRY_DELAY_MS * (attempt + 1) + jitter);
+    } finally {
+      if (timeoutId) clearTimeout(timeoutId);
+    }
+  }
+  throw lastErr || new Error("Unknown network error");
+}
 
 /****************************************
  * 1) ASCII Loader Frames
@@ -368,7 +433,7 @@ export default function FAIVConsole() {
     try {
       if (typeof window === "undefined") return "";
       const params = new URLSearchParams(window.location.search);
-      return params.get("embed_session") || sessionStorage.getItem("faiv_embed_session") || "";
+      return params.get("embed_session") || getStorageItem(sessionStorage, "faiv_embed_session", "");
     } catch {
       return "";
     }
@@ -377,7 +442,7 @@ export default function FAIVConsole() {
   // Store deliberation text per message index (persisted in localStorage)
   const [deliberations, setDeliberations] = useState(() => {
     try {
-      const stored = localStorage.getItem("faiv_deliberations");
+      const stored = getStorageItem(localStorage, "faiv_deliberations", "");
       return stored ? JSON.parse(stored) : {};
     } catch { return {}; }
   });
@@ -388,7 +453,7 @@ export default function FAIVConsole() {
   // Track which tiles have replies: { "delibKey-entryIdx": replyMsgIdx } (persisted in localStorage)
   const [repliedTiles, setRepliedTiles] = useState(() => {
     try {
-      const stored = localStorage.getItem("faiv_replied_tiles");
+      const stored = getStorageItem(localStorage, "faiv_replied_tiles", "");
       return stored ? JSON.parse(stored) : {};
     } catch { return {}; }
   });
@@ -414,24 +479,46 @@ export default function FAIVConsole() {
     };
   }, [embedSessionToken]);
 
+  const requestOptions = useCallback(
+    (options = {}, forceCookieAuth = false) => {
+      const { credentials, ...rest } = options;
+      return {
+        mode: "cors",
+        cache: "no-store",
+        ...rest,
+        credentials:
+          credentials || (forceCookieAuth ? "include" : embedSessionToken ? "omit" : "include"),
+      };
+    },
+    [embedSessionToken]
+  );
+
   useEffect(() => {
     if (typeof window === "undefined") return;
     const params = new URLSearchParams(window.location.search);
     const embedSessionFromQuery = params.get("embed_session");
 
     if (embedSessionFromQuery) {
-      sessionStorage.setItem("faiv_embed_session", embedSessionFromQuery);
       setEmbedSessionToken(embedSessionFromQuery);
-      params.delete("embed_session");
-      const nextQuery = params.toString();
-      const nextUrl = `${window.location.pathname}${nextQuery ? `?${nextQuery}` : ""}${window.location.hash}`;
-      window.history.replaceState({}, document.title, nextUrl);
+      setStorageItem(sessionStorage, "faiv_embed_session", embedSessionFromQuery);
+      const canPersist = getStorageItem(sessionStorage, "faiv_embed_session", "") === embedSessionFromQuery;
+
+      if (canPersist) {
+        params.delete("embed_session");
+        const nextQuery = params.toString();
+        const nextUrl = `${window.location.pathname}${nextQuery ? `?${nextQuery}` : ""}${window.location.hash}`;
+        window.history.replaceState({}, document.title, nextUrl);
+      }
       return;
     }
 
-    const storedSession = sessionStorage.getItem("faiv_embed_session") || "";
-    if (storedSession && storedSession !== embedSessionToken) {
-      setEmbedSessionToken(storedSession);
+    try {
+      const storedSession = getStorageItem(sessionStorage, "faiv_embed_session", "");
+      if (storedSession && storedSession !== embedSessionToken) {
+        setEmbedSessionToken(storedSession);
+      }
+    } catch {
+      // Ignore storage read failures in restricted browsing contexts.
     }
   }, [embedSessionToken]);
 
@@ -440,10 +527,12 @@ export default function FAIVConsole() {
 
     async function checkAuthStatus() {
       try {
-        const resp = await fetch(`${API_BASE}/api/auth-status`, {
-          headers: withEmbedSessionHeader(),
-          credentials: "include",
-        });
+        const resp = await fetchWithRetry(
+          `${API_BASE}/api/auth-status`,
+          requestOptions({
+            headers: withEmbedSessionHeader(),
+          })
+        );
         if (!alive) return;
         if (!resp.ok) {
           setPasswordProtected(true);
@@ -471,16 +560,18 @@ export default function FAIVConsole() {
     return () => {
       alive = false;
     };
-  }, [withEmbedSessionHeader]);
+  }, [requestOptions, withEmbedSessionHeader]);
 
   // Health check on mount + periodic
   useEffect(() => {
     async function checkHealth() {
       try {
-        const resp = await fetch(`${API_BASE}/health`, {
-          headers: withEmbedSessionHeader(),
-          credentials: "include",
-        });
+        const resp = await fetchWithRetry(
+          `${API_BASE}/health`,
+          requestOptions({
+            headers: withEmbedSessionHeader(),
+          })
+        );
         if (resp.ok) {
           setApiStatus("ok");
         } else {
@@ -493,7 +584,7 @@ export default function FAIVConsole() {
     checkHealth();
     const interval = setInterval(checkHealth, 30000);
     return () => clearInterval(interval);
-  }, [withEmbedSessionHeader]);
+  }, [requestOptions, withEmbedSessionHeader]);
 
   async function handleUnlockSubmit(e) {
     e.preventDefault();
@@ -501,12 +592,17 @@ export default function FAIVConsole() {
     setUnlockSubmitting(true);
     setUnlockError("");
     try {
-      const resp = await fetch(`${API_BASE}/api/unlock`, {
-        method: "POST",
-        headers: withEmbedSessionHeader({ "Content-Type": "application/json", Accept: "application/json" }),
-        credentials: "include",
-        body: JSON.stringify({ password: unlockPassword }),
-      });
+      const resp = await fetchWithRetry(
+        `${API_BASE}/api/unlock`,
+        requestOptions(
+          {
+            method: "POST",
+            headers: withEmbedSessionHeader({ "Content-Type": "application/json", Accept: "application/json" }),
+            body: JSON.stringify({ password: unlockPassword }),
+          },
+          true
+        )
+      );
 
       if (!resp.ok) {
         const payload = await resp.json().catch(() => ({}));
@@ -537,19 +633,19 @@ export default function FAIVConsole() {
 
   // 2) On mount => load existing sessions from localStorage
   useEffect(() => {
-    const stored = localStorage.getItem("faiv_sessions");
+    const stored = getStorageItem(localStorage, "faiv_sessions", "");
     if (stored) {
       const parsed = JSON.parse(stored);
       setAllSessions(parsed);
 
-      const lastActive = localStorage.getItem("faiv_session_id") || "";
+      const lastActive = getStorageItem(localStorage, "faiv_session_id", "");
       if (lastActive && parsed[lastActive]) {
         setActiveSessionId(lastActive);
       } else {
         const keys = Object.keys(parsed);
         if (keys.length > 0) {
           setActiveSessionId(keys[0]);
-          localStorage.setItem("faiv_session_id", keys[0]);
+          setStorageItem(localStorage, "faiv_session_id", keys[0]);
         } else {
           handleNewChat();
         }
@@ -561,16 +657,16 @@ export default function FAIVConsole() {
 
   // 3) Whenever sessions change => persist
   useEffect(() => {
-    localStorage.setItem("faiv_sessions", JSON.stringify(allSessions));
+    setStorageItem(localStorage, "faiv_sessions", JSON.stringify(allSessions));
   }, [allSessions]);
 
   // 3b) Persist deliberations and replied tiles
   useEffect(() => {
-    localStorage.setItem("faiv_deliberations", JSON.stringify(deliberations));
+    setStorageItem(localStorage, "faiv_deliberations", JSON.stringify(deliberations));
   }, [deliberations]);
 
   useEffect(() => {
-    localStorage.setItem("faiv_replied_tiles", JSON.stringify(repliedTiles));
+    setStorageItem(localStorage, "faiv_replied_tiles", JSON.stringify(repliedTiles));
   }, [repliedTiles]);
 
   // 4) Animate progress bar
@@ -625,7 +721,7 @@ export default function FAIVConsole() {
     const newSession = { title: newTitle, messages: [] };
     setAllSessions((prev) => ({ ...prev, [newId]: newSession }));
     setActiveSessionId(newId);
-    localStorage.setItem("faiv_session_id", newId);
+    setStorageItem(localStorage, "faiv_session_id", newId);
     setHistoryOpen(false);
   }
 
@@ -673,7 +769,7 @@ export default function FAIVConsole() {
       const remain = Object.keys(allSessions).filter((id) => id !== sessId);
       if (remain.length > 0) {
         setActiveSessionId(remain[0]);
-        localStorage.setItem("faiv_session_id", remain[0]);
+        setStorageItem(localStorage, "faiv_session_id", remain[0]);
       } else {
         handleNewChat();
       }
@@ -682,7 +778,7 @@ export default function FAIVConsole() {
 
   function handleSelectSession(sessId) {
     setActiveSessionId(sessId);
-    localStorage.setItem("faiv_session_id", sessId);
+    setStorageItem(localStorage, "faiv_session_id", sessId);
     setHistoryOpen(false);
   }
 
@@ -717,21 +813,25 @@ export default function FAIVConsole() {
     setInput("");
     setLoading(true);
     setLastError(null);
+    const requestId = makeRequestId("query");
 
     try {
-      const resp = await fetch(`${API_BASE}/query/`, {
-        method: "POST",
-        headers: withEmbedSessionHeader({
-          "Content-Type": "application/json",
-          Accept: "application/json",
-        }),
-        credentials: "include",
-        body: JSON.stringify({
-          session_id: activeSessionId,
-          input_text: capturedInput,
-          pillar: selectedPillar,
-        }),
-      });
+      const resp = await fetchWithRetry(
+        `${API_BASE}/query/`,
+        requestOptions({
+          method: "POST",
+          headers: withEmbedSessionHeader({
+            "Content-Type": "application/json",
+            Accept: "application/json",
+          }),
+          body: JSON.stringify({
+            session_id: activeSessionId,
+            input_text: capturedInput,
+            pillar: selectedPillar,
+            request_id: requestId,
+          }),
+        })
+      );
       if (!resp.ok) {
         const errorBody = await resp.text();
         if (resp.status === 401) {
@@ -762,17 +862,16 @@ export default function FAIVConsole() {
       // Refresh health status on success
       setApiStatus("ok");
     } catch (err) {
-      const isNetworkError =
-        err.message === "Failed to fetch" ||
-        err.message === "Load failed" ||
-        err.name === "TypeError";
+      const isNetworkError = isNetworkFetchError(err);
       const displayMsg = isNetworkError
-        ? "Cannot reach FAIV API. Is the backend running?"
+        ? "Cannot reach FAIV API right now. Please retry."
         : `API error: ${err.message}`;
       updated.push(`[ERROR] ${displayMsg}`);
       updateSessionMessages(activeSessionId, updated);
-      setLastError(err.message);
-      if (isNetworkError) setApiStatus("down");
+      setLastError(`${err.name || "Error"}: ${err.message}`);
+      if (isNetworkError) {
+        setApiStatus("down");
+      }
     } finally {
       setLoading(false);
     }
@@ -814,22 +913,26 @@ export default function FAIVConsole() {
     // Track the tile-to-reply link
     const tileKey = `${activeSessionId}-${msgIdx}-${entryIndex}`;
     setRepliedTiles((prev) => ({ ...prev, [tileKey]: replyMsgIdx }));
+    const requestId = makeRequestId("redeliberate");
 
     try {
-      const resp = await fetch(`${API_BASE}/redeliberate/`, {
-        method: "POST",
-        headers: withEmbedSessionHeader({ "Content-Type": "application/json", Accept: "application/json" }),
-        credentials: "include",
-        body: JSON.stringify({
-          session_id: activeSessionId,
-          original_input: originalInput,
-          deliberation_up_to: deliberationUpTo,
-          user_comment: comment,
-          target_member: entry.member,
-          pillar: selectedPillar,
-          council_members: councilNames,
-        }),
-      });
+      const resp = await fetchWithRetry(
+        `${API_BASE}/redeliberate/`,
+        requestOptions({
+          method: "POST",
+          headers: withEmbedSessionHeader({ "Content-Type": "application/json", Accept: "application/json" }),
+          body: JSON.stringify({
+            session_id: activeSessionId,
+            original_input: originalInput,
+            deliberation_up_to: deliberationUpTo,
+            user_comment: comment,
+            target_member: entry.member,
+            pillar: selectedPillar,
+            council_members: councilNames,
+            request_id: requestId,
+          }),
+        })
+      );
       if (!resp.ok) {
         const errorBody = await resp.text();
         if (resp.status === 401) {
@@ -857,16 +960,13 @@ export default function FAIVConsole() {
       }
       setApiStatus("ok");
     } catch (err) {
-      const isNetworkError =
-        err.message === "Failed to fetch" ||
-        err.message === "Load failed" ||
-        err.name === "TypeError";
+      const isNetworkError = isNetworkFetchError(err);
       const displayMsg = isNetworkError
-        ? "Cannot reach FAIV API."
+        ? "Cannot reach FAIV API right now. Please retry."
         : `API error: ${err.message}`;
       updated.push(`[ERROR] ${displayMsg}`);
       updateSessionMessages(activeSessionId, updated);
-      setLastError(err.message);
+      setLastError(`${err.name || "Error"}: ${err.message}`);
       if (isNetworkError) setApiStatus("down");
     } finally {
       setLoading(false);
@@ -883,11 +983,13 @@ export default function FAIVConsole() {
   async function handleResetSession() {
     if (!activeSessionId) return;
     try {
-      await fetch(`${API_BASE}/reset/?session_id=${encodeURIComponent(activeSessionId)}`, {
-        method: "POST",
-        headers: withEmbedSessionHeader(),
-        credentials: "include",
-      });
+      await fetchWithRetry(
+        `${API_BASE}/reset/?session_id=${encodeURIComponent(activeSessionId)}`,
+        requestOptions({
+          method: "POST",
+          headers: withEmbedSessionHeader(),
+        })
+      );
     } catch {
       // Backend reset is best-effort; clear locally regardless
     }

@@ -72,12 +72,17 @@ EMBED_APP_URL = (os.getenv("FAIV_EMBED_APP_URL") or "https://faiv.ai").strip() o
 FRAME_ANCESTORS_VALUE = "frame-ancestors 'self' https://jol3.com https://www.jol3.com"
 EMBED_SESSION_HEADER = "x-faiv-embed-session"
 EMBED_SESSION_QUERY_PARAM = "embed_session"
+OPENAI_MAX_OUTPUT_TOKENS = int(os.getenv("FAIV_OPENAI_MAX_OUTPUT_TOKENS", "900"))
+OPENAI_CLIENT_TIMEOUT_SECONDS = float(os.getenv("FAIV_OPENAI_TIMEOUT_SECONDS", "35"))
+OPENAI_CLIENT_MAX_RETRIES = int(os.getenv("FAIV_OPENAI_MAX_RETRIES", "1"))
+IDEMPOTENCY_TTL_SECONDS = int(os.getenv("FAIV_IDEMPOTENCY_TTL_SECONDS", "180"))
 
 # In-memory rate-limit fallback when Redis is unavailable
 _memory_rate_limits = {}
 
 # In-memory session fallback when Redis is unavailable
 _memory_sessions = {}
+_memory_idempotency_cache = {}
 _redis_available = False
 redis_client = None
 
@@ -125,7 +130,11 @@ if not OPENAI_API_KEY:
     logger.warning("OPENAI_API_KEY is not set. Server will start but queries will fail.")
     client = None
 else:
-    client = OpenAI(api_key=OPENAI_API_KEY)
+    client = OpenAI(
+        api_key=OPENAI_API_KEY,
+        timeout=OPENAI_CLIENT_TIMEOUT_SECONDS,
+        max_retries=OPENAI_CLIENT_MAX_RETRIES,
+    )
 
 
 def _cookie_secure(request: Request) -> bool:
@@ -252,6 +261,25 @@ def _is_allowed_embed_origin(request: Request) -> bool:
     return False
 
 
+def _is_allowed_cors_origin(origin: str) -> bool:
+    if not origin:
+        return False
+    try:
+        parsed = urlparse(origin)
+    except Exception:
+        return False
+
+    scheme = (parsed.scheme or "").lower()
+    host = (parsed.hostname or "").lower()
+    port = parsed.port
+
+    if scheme == "https" and host in {"faiv.ai", "www.faiv.ai", "jol3.com", "www.jol3.com"}:
+        return True
+    if scheme == "http" and host in {"localhost", "127.0.0.1"}:
+        return port in {None, 3000}
+    return False
+
+
 def _append_vary_header(response, value: str) -> None:
     existing = response.headers.get("vary")
     if not existing:
@@ -267,11 +295,43 @@ def _apply_cors_headers(request: Request, response) -> None:
     origin = request.headers.get("origin", "").strip()
     if not origin:
         return
-    if origin not in ALLOWED_CORS_ORIGINS:
+    if not _is_allowed_cors_origin(origin):
         return
     response.headers["access-control-allow-origin"] = origin
     response.headers["access-control-allow-credentials"] = "true"
     _append_vary_header(response, "Origin")
+
+
+def _cleanup_idempotency_cache(now_ts: float) -> None:
+    stale_keys = [
+        key
+        for key, (expires_ts, _payload) in _memory_idempotency_cache.items()
+        if expires_ts <= now_ts
+    ]
+    for key in stale_keys:
+        _memory_idempotency_cache.pop(key, None)
+
+
+def _idempotency_get(cache_key: str):
+    if not cache_key:
+        return None
+    now_ts = time.time()
+    _cleanup_idempotency_cache(now_ts)
+    cached = _memory_idempotency_cache.get(cache_key)
+    if not cached:
+        return None
+    expires_ts, payload = cached
+    if expires_ts <= now_ts:
+        _memory_idempotency_cache.pop(cache_key, None)
+        return None
+    return payload
+
+
+def _idempotency_set(cache_key: str, payload) -> None:
+    if not cache_key:
+        return
+    expires_ts = time.time() + max(30, IDEMPOTENCY_TTL_SECONDS)
+    _memory_idempotency_cache[cache_key] = (expires_ts, payload)
 
 
 def is_disallowed_prompt(text: str) -> bool:
@@ -778,7 +838,7 @@ def query_openai_faiv(
             top_p=0.8,
             frequency_penalty=0.3,
             presence_penalty=0.2,
-            max_tokens=2048,
+            max_tokens=OPENAI_MAX_OUTPUT_TOKENS,
             user=safety_id or session_id,
         )
         raw = resp.choices[0].message.content.strip()
@@ -800,6 +860,7 @@ class QueryRequest(BaseModel):
     session_id: str
     input_text: str
     pillar: Optional[str] = "FAIV"
+    request_id: Optional[str] = None
 
 
 class RedeliberateRequest(BaseModel):
@@ -810,6 +871,7 @@ class RedeliberateRequest(BaseModel):
     target_member: str
     pillar: Optional[str] = "FAIV"
     council_members: list = []
+    request_id: Optional[str] = None
 
 
 class UnlockRequest(BaseModel):
@@ -820,6 +882,7 @@ fastapi_app = FastAPI()
 ALLOWED_CORS_ORIGINS = {
     "https://faiv.ai",
     "https://www.faiv.ai",
+    "https://api.faiv.ai",
     "https://jol3.com",
     "https://www.jol3.com",
     "http://localhost:3000",
@@ -828,6 +891,7 @@ ALLOWED_CORS_ORIGINS = {
 fastapi_app.add_middleware(
     CORSMiddleware,
     allow_origins=sorted(ALLOWED_CORS_ORIGINS),
+    allow_origin_regex=r"^https://([a-z0-9-]+\.)?faiv\.ai(?::\d+)?$|^https://([a-z0-9-]+\.)?jol3\.com(?::\d+)?$|^http://(localhost|127\.0\.0\.1)(?::\d+)?$",
     allow_credentials=True,
     allow_methods=["OPTIONS", "GET", "POST"],
     allow_headers=["*"],
@@ -871,6 +935,7 @@ async def faiv_security_middleware(request: Request, call_next):
     response = await call_next(request)
     if has_new_visitor_cookie:
         _set_visitor_cookie(response, request, visitor_id)
+    _apply_cors_headers(request, response)
     _apply_frame_headers(response)
     return response
 
@@ -1251,6 +1316,11 @@ async def query_faiv_endpoint(payload: QueryRequest, request: Request):
         session_id = payload.session_id
         user_input = payload.input_text
         chosen_pillar = payload.pillar or "FAIV"
+        request_id = (payload.request_id or "").strip()[:128]
+        cache_key = f"query:{session_id}:{request_id}" if request_id else ""
+        cached_payload = _idempotency_get(cache_key)
+        if cached_payload is not None:
+            return cached_payload
 
         blocked = is_disallowed_prompt(user_input) or moderation_gate(user_input)
         if blocked:
@@ -1275,7 +1345,7 @@ async def query_faiv_endpoint(payload: QueryRequest, request: Request):
 
         if _is_openai_api_error(parsed):
             logger.error("OpenAI query failed for session_id=%s: %s", session_id, parsed)
-            return {
+            response_payload = {
                 "status": "OpenAI API Error",
                 "response": _humanize_openai_error(parsed),
                 "pillar": chosen_pillar,
@@ -1283,11 +1353,13 @@ async def query_faiv_endpoint(payload: QueryRequest, request: Request):
                 "deliberation": deliberation if deliberation else None,
                 "council": council,
             }
+            _idempotency_set(cache_key, response_payload)
+            return response_payload
 
         if "Consensus:" not in parsed:
             logger.warning("No valid consensus found. Resetting session.")
             session_delete(session_id)
-            return {
+            response_payload = {
                 "status": "AI Failed Compliance.",
                 "response": "No valid consensus. Session reset.",
                 "pillar": chosen_pillar,
@@ -1295,12 +1367,14 @@ async def query_faiv_endpoint(payload: QueryRequest, request: Request):
                 "deliberation": deliberation if deliberation else None,
                 "council": council,
             }
+            _idempotency_set(cache_key, response_payload)
+            return response_payload
 
         past_messages.append({"role": "user", "content": user_input})
         past_messages.append({"role": "assistant", "content": parsed})
         session_set(session_id, json.dumps(past_messages, ensure_ascii=False))
 
-        return {
+        response_payload = {
             "status": "FAIV Processing Complete",
             "response": parsed,
             "pillar": chosen_pillar,
@@ -1308,6 +1382,8 @@ async def query_faiv_endpoint(payload: QueryRequest, request: Request):
             "deliberation": deliberation if deliberation else None,
             "council": council,
         }
+        _idempotency_set(cache_key, response_payload)
+        return response_payload
 
     except Exception as e:
         logger.error(f"Server Error in /query/: {str(e)}")
@@ -1423,7 +1499,7 @@ RESPONSE FORMAT (MANDATORY):
             top_p=0.8,
             frequency_penalty=0.3,
             presence_penalty=0.2,
-            max_tokens=2048,
+            max_tokens=OPENAI_MAX_OUTPUT_TOKENS,
             user=safety_id or session_id,
         )
         raw = resp.choices[0].message.content.strip()
@@ -1449,6 +1525,11 @@ async def redeliberate_endpoint(payload: RedeliberateRequest, request: Request):
 
         session_id = payload.session_id
         chosen_pillar = payload.pillar or "FAIV"
+        request_id = (payload.request_id or "").strip()[:128]
+        cache_key = f"redeliberate:{session_id}:{request_id}" if request_id else ""
+        cached_payload = _idempotency_get(cache_key)
+        if cached_payload is not None:
+            return cached_payload
 
         disallowed_text = "\n".join(
             [
@@ -1484,7 +1565,7 @@ async def redeliberate_endpoint(payload: RedeliberateRequest, request: Request):
 
         if _is_openai_api_error(parsed):
             logger.error("OpenAI re-deliberation failed for session_id=%s: %s", session_id, parsed)
-            return {
+            response_payload = {
                 "status": "OpenAI API Error",
                 "response": _humanize_openai_error(parsed),
                 "pillar": chosen_pillar,
@@ -1492,9 +1573,11 @@ async def redeliberate_endpoint(payload: RedeliberateRequest, request: Request):
                 "deliberation": deliberation if deliberation else None,
                 "council": council,
             }
+            _idempotency_set(cache_key, response_payload)
+            return response_payload
 
         if "Consensus:" not in parsed:
-            return {
+            response_payload = {
                 "status": "AI Failed Compliance.",
                 "response": "No valid consensus from re-deliberation.",
                 "pillar": chosen_pillar,
@@ -1502,12 +1585,14 @@ async def redeliberate_endpoint(payload: RedeliberateRequest, request: Request):
                 "deliberation": deliberation if deliberation else None,
                 "council": council,
             }
+            _idempotency_set(cache_key, response_payload)
+            return response_payload
 
         past_messages.append({"role": "user", "content": f"[Re-deliberation on {payload.target_member}]: {payload.user_comment}"})
         past_messages.append({"role": "assistant", "content": parsed})
         session_set(session_id, json.dumps(past_messages, ensure_ascii=False))
 
-        return {
+        response_payload = {
             "status": "FAIV Re-Deliberation Complete",
             "response": parsed,
             "pillar": chosen_pillar,
@@ -1515,6 +1600,8 @@ async def redeliberate_endpoint(payload: RedeliberateRequest, request: Request):
             "deliberation": deliberation if deliberation else None,
             "council": council,
         }
+        _idempotency_set(cache_key, response_payload)
+        return response_payload
 
     except Exception as e:
         logger.error(f"Server Error in /redeliberate/: {str(e)}")

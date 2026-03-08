@@ -1,0 +1,3 @@
+<IfModule mod_http2.c>
+  H2Engine off
+</IfModule>
