@@ -72,6 +72,24 @@ jobs:
         run: |
           set -euo pipefail
           printf 'restart %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" > /tmp/restart.txt
+          BACKEND_PATH="${BACKEND_DIR#/}"
+          BACKEND_PATH="${BACKEND_PATH%/}"
+          if [ -z "${BACKEND_PATH}" ] || [ "${BACKEND_PATH}" = "." ]; then
+            BACKEND_REMOTE="."
+            BACKEND_ABS="/home/${FTP_USER}"
+          else
+            BACKEND_REMOTE="${BACKEND_PATH}"
+            BACKEND_ABS="/home/${FTP_USER}/${BACKEND_PATH}"
+          fi
+          cat > /tmp/faiv.backend.htaccess <<EOF
+          <IfModule mod_passenger.c>
+            PassengerEnabled on
+            PassengerAppType wsgi
+            PassengerStartupFile passenger_wsgi.py
+            PassengerAppRoot "${BACKEND_ABS}"
+            PassengerPython "${BACKEND_ABS}/venv/bin/python"
+          </IfModule>
+          EOF
 
           lftp -e "
             set net:max-retries 2;
@@ -79,12 +97,13 @@ jobs:
             set ssl:verify-certificate no;
             set xfer:clobber yes;
             open -u $FTP_USER,$FTP_PASSWORD -p $FTP_PORT ftp://$FTP_HOST;
-            rm -f $BACKEND_DIR/.htaccess;
             mirror -R --delete --verbose=1 faiv-console/build $FRONTEND_DIR;
-            mirror -R --delete --verbose=1 --exclude-glob __pycache__/ --exclude-glob *.pyc faiv_app $BACKEND_DIR/faiv_app;
-            put -O $BACKEND_DIR passenger_wsgi.py;
-            put -O $BACKEND_DIR requirements.txt;
-            put -O $BACKEND_DIR /tmp/faiv.env.local -o .env.local;
-            put -O $BACKEND_DIR/tmp /tmp/restart.txt -o restart.txt;
+            mirror -R --delete --verbose=1 --exclude-glob __pycache__/ --exclude-glob *.pyc faiv_app $BACKEND_REMOTE/faiv_app;
+            put -O $BACKEND_REMOTE passenger_wsgi.py;
+            put -O $BACKEND_REMOTE requirements.txt;
+            put /tmp/faiv.backend.htaccess -o $BACKEND_REMOTE/.htaccess;
+            put /tmp/faiv.env.local -o $BACKEND_REMOTE/.env.local;
+            mkdir -p $BACKEND_REMOTE/tmp;
+            put /tmp/restart.txt -o $BACKEND_REMOTE/tmp/restart.txt;
             bye
           "
