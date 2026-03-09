@@ -665,10 +665,9 @@ body {
    15) Tile Comment Form
 ========================================= */
 .tile-comment-form {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  display: flex;
   align-items: stretch;
-  gap: 4px;
+  gap: 6px;
   margin-top: 6px;
   padding-top: 6px;
   border-top: 1px dotted #003300;
@@ -698,13 +697,16 @@ body {
   font-size: 12px;
   font-weight: bold;
   border: none;
-  min-width: 74px;
-  max-width: 46%;
-  padding: 3px 7px;
+  width: auto;
+  min-width: 68px;
+  max-width: none;
+  padding: 4px 10px;
   cursor: pointer;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  flex: 0 0 auto;
+  align-self: stretch;
   box-shadow:
     inset -1px -1px 0 #003300,
     inset 1px 1px 0 #99ff99;
@@ -935,17 +937,16 @@ body {
   }
 
   .tile-comment-form {
-    grid-template-columns: minmax(0, 1fr) minmax(72px, 34%);
+    display: flex;
     gap: 5px;
   }
 
   .tile-comment-submit {
-    width: 100%;
-    min-width: 0;
-    max-width: none;
-    font-size: 10px;
-    line-height: 1.1;
-    padding: 5px 6px;
+    width: auto;
+    min-width: 62px;
+    font-size: 11px;
+    line-height: 1.15;
+    padding: 5px 8px;
   }
 
   /* Deliberation tiles: full width */
@@ -1007,13 +1008,23 @@ body {
   }
 
   .tile-comment-form {
-    grid-template-columns: minmax(0, 1fr) minmax(64px, 31%);
+    display: flex;
     gap: 4px;
   }
 
   .tile-comment-submit {
-    font-size: 9px;
-    padding: 5px 4px;
+    font-size: 10px;
+    min-width: 58px;
+    padding: 5px 7px;
+  }
+}
+
+@media (hover: none) and (pointer: coarse) {
+  .input-field,
+  .tile-comment-input,
+  .modal-box input,
+  .lock-input {
+    font-size: 16px;
   }
 }
 
