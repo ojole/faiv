@@ -76,6 +76,8 @@ OPENAI_DEFAULT_MODEL = os.getenv("FAIV_OPENAI_MODEL", "gpt-5.4")
 OPENAI_MAX_OUTPUT_TOKENS = int(os.getenv("FAIV_OPENAI_MAX_OUTPUT_TOKENS", "900"))
 OPENAI_MAX_OUTPUT_TOKENS_VERDICT = int(os.getenv("FAIV_OPENAI_MAX_OUTPUT_TOKENS_VERDICT", "1200"))
 OPENAI_MAX_OUTPUT_TOKENS_DEEP = int(os.getenv("FAIV_OPENAI_MAX_OUTPUT_TOKENS_DEEP", "3500"))
+OPENAI_MAX_OUTPUT_TOKENS_VERDICT_CAP = int(os.getenv("FAIV_OPENAI_MAX_OUTPUT_TOKENS_VERDICT_CAP", "1200"))
+OPENAI_MAX_OUTPUT_TOKENS_DEEP_CAP = int(os.getenv("FAIV_OPENAI_MAX_OUTPUT_TOKENS_DEEP_CAP", "2200"))
 OPENAI_VERDICT_TEMPERATURE = float(os.getenv("FAIV_OPENAI_TEMPERATURE_VERDICT", "0.2"))
 OPENAI_DEEP_TEMPERATURE = float(os.getenv("FAIV_OPENAI_TEMPERATURE_DEEP", "0.42"))
 OPENAI_VERDICT_TOP_P = float(os.getenv("FAIV_OPENAI_TOP_P_VERDICT", "0.8"))
@@ -85,6 +87,8 @@ OPENAI_DEEP_FREQ_PENALTY = float(os.getenv("FAIV_OPENAI_FREQ_PENALTY_DEEP", "0.2
 OPENAI_VERDICT_PRES_PENALTY = float(os.getenv("FAIV_OPENAI_PRES_PENALTY_VERDICT", "0.1"))
 OPENAI_DEEP_PRES_PENALTY = float(os.getenv("FAIV_OPENAI_PRES_PENALTY_DEEP", "0.3"))
 OPENAI_CLIENT_TIMEOUT_SECONDS = float(os.getenv("FAIV_OPENAI_TIMEOUT_SECONDS", "35"))
+OPENAI_TIMEOUT_SECONDS_VERDICT = float(os.getenv("FAIV_OPENAI_TIMEOUT_SECONDS_VERDICT", "70"))
+OPENAI_TIMEOUT_SECONDS_DEEP = float(os.getenv("FAIV_OPENAI_TIMEOUT_SECONDS_DEEP", "110"))
 OPENAI_CLIENT_MAX_RETRIES = int(os.getenv("FAIV_OPENAI_MAX_RETRIES", "1"))
 IDEMPOTENCY_TTL_SECONDS = int(os.getenv("FAIV_IDEMPOTENCY_TTL_SECONDS", "180"))
 
@@ -446,8 +450,19 @@ def normalize_mode(mode: Optional[str]) -> str:
 def get_max_output_tokens(mode: str) -> int:
     normalized = normalize_mode(mode)
     if normalized == MODE_DEEP:
-        return max(1200, OPENAI_MAX_OUTPUT_TOKENS_DEEP)
-    return max(600, OPENAI_MAX_OUTPUT_TOKENS_VERDICT)
+        requested = max(1200, OPENAI_MAX_OUTPUT_TOKENS_DEEP)
+        cap = max(1600, OPENAI_MAX_OUTPUT_TOKENS_DEEP_CAP)
+        return min(requested, cap)
+    requested = max(600, OPENAI_MAX_OUTPUT_TOKENS_VERDICT)
+    cap = max(800, OPENAI_MAX_OUTPUT_TOKENS_VERDICT_CAP)
+    return min(requested, cap)
+
+
+def get_request_timeout(mode: str) -> float:
+    normalized = normalize_mode(mode)
+    if normalized == MODE_DEEP:
+        return max(OPENAI_CLIENT_TIMEOUT_SECONDS, OPENAI_TIMEOUT_SECONDS_DEEP)
+    return max(OPENAI_CLIENT_TIMEOUT_SECONDS, OPENAI_TIMEOUT_SECONDS_VERDICT)
 
 
 def get_model_settings(mode: str) -> dict:
@@ -474,26 +489,57 @@ def create_chat_completion(
     max_output_tokens: int,
     user: str,
     generation: dict,
+    mode: str,
 ):
     """Call Chat Completions with token-parameter compatibility across models."""
-    request_kwargs = {
+    normalized_mode = normalize_mode(mode)
+    request_timeout = get_request_timeout(normalized_mode)
+
+    base_request_kwargs = {
         "model": model,
         "messages": messages,
-        "max_completion_tokens": max_output_tokens,
         "user": user,
+        "timeout": request_timeout,
         **generation,
     }
-    try:
+
+    def _invoke_with_tokens(token_budget: int, use_legacy_tokens: bool = False):
+        request_kwargs = dict(base_request_kwargs)
+        if use_legacy_tokens:
+            request_kwargs["max_tokens"] = token_budget
+        else:
+            request_kwargs["max_completion_tokens"] = token_budget
         return client.chat.completions.create(**request_kwargs)
+
+    try:
+        return _invoke_with_tokens(max_output_tokens)
     except Exception as ex:
-        # Some legacy models only accept `max_tokens`; retry once for compatibility.
         err = str(ex).lower()
+        # Some legacy models only accept `max_tokens`; retry once for compatibility.
         if "max_completion_tokens" in err and "unsupported" in err:
-            fallback_kwargs = dict(request_kwargs)
-            fallback_kwargs.pop("max_completion_tokens", None)
-            fallback_kwargs["max_tokens"] = max_output_tokens
             logger.info("Retrying chat completion with max_tokens for model=%s", model)
-            return client.chat.completions.create(**fallback_kwargs)
+            return _invoke_with_tokens(max_output_tokens, use_legacy_tokens=True)
+
+        is_timeout = ("timed out" in err) or ("timeout" in err)
+        if is_timeout:
+            retry_budget = max(700, int(max_output_tokens * 0.65))
+            if normalized_mode == MODE_DEEP:
+                retry_budget = max(1200, retry_budget)
+            if retry_budget < max_output_tokens:
+                logger.warning(
+                    "OpenAI request timed out for model=%s mode=%s. Retrying with lower token budget (%s -> %s).",
+                    model,
+                    normalized_mode,
+                    max_output_tokens,
+                    retry_budget,
+                )
+                try:
+                    return _invoke_with_tokens(retry_budget)
+                except Exception as retry_ex:
+                    retry_err = str(retry_ex).lower()
+                    if "max_completion_tokens" in retry_err and "unsupported" in retry_err:
+                        return _invoke_with_tokens(retry_budget, use_legacy_tokens=True)
+                    raise retry_ex
         raise
 
 
@@ -1324,6 +1370,7 @@ def query_openai_faiv(
             max_output_tokens=get_max_output_tokens(normalized_mode),
             user=safety_id or session_id,
             generation=generation,
+            mode=normalized_mode,
         )
         raw = resp.choices[0].message.content.strip()
         deliberation, final_text = split_response_sections(raw)
@@ -1976,6 +2023,7 @@ def query_openai_redeliberate(
             max_output_tokens=get_max_output_tokens(normalized_mode),
             user=safety_id or session_id,
             generation=generation,
+            mode=normalized_mode,
         )
         raw = resp.choices[0].message.content.strip()
         deliberation, final_text = split_response_sections(raw)
