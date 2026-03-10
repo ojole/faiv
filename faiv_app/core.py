@@ -13,7 +13,7 @@ from openai import OpenAI
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -72,7 +72,18 @@ EMBED_APP_URL = (os.getenv("FAIV_EMBED_APP_URL") or "https://faiv.ai").strip() o
 FRAME_ANCESTORS_VALUE = "frame-ancestors 'self' https://jol3.com https://www.jol3.com"
 EMBED_SESSION_HEADER = "x-faiv-embed-session"
 EMBED_SESSION_QUERY_PARAM = "embed_session"
+OPENAI_DEFAULT_MODEL = os.getenv("FAIV_OPENAI_MODEL", "gpt-5.4")
 OPENAI_MAX_OUTPUT_TOKENS = int(os.getenv("FAIV_OPENAI_MAX_OUTPUT_TOKENS", "900"))
+OPENAI_MAX_OUTPUT_TOKENS_VERDICT = int(os.getenv("FAIV_OPENAI_MAX_OUTPUT_TOKENS_VERDICT", "1200"))
+OPENAI_MAX_OUTPUT_TOKENS_DEEP = int(os.getenv("FAIV_OPENAI_MAX_OUTPUT_TOKENS_DEEP", "3500"))
+OPENAI_VERDICT_TEMPERATURE = float(os.getenv("FAIV_OPENAI_TEMPERATURE_VERDICT", "0.2"))
+OPENAI_DEEP_TEMPERATURE = float(os.getenv("FAIV_OPENAI_TEMPERATURE_DEEP", "0.42"))
+OPENAI_VERDICT_TOP_P = float(os.getenv("FAIV_OPENAI_TOP_P_VERDICT", "0.8"))
+OPENAI_DEEP_TOP_P = float(os.getenv("FAIV_OPENAI_TOP_P_DEEP", "0.9"))
+OPENAI_VERDICT_FREQ_PENALTY = float(os.getenv("FAIV_OPENAI_FREQ_PENALTY_VERDICT", "0.2"))
+OPENAI_DEEP_FREQ_PENALTY = float(os.getenv("FAIV_OPENAI_FREQ_PENALTY_DEEP", "0.25"))
+OPENAI_VERDICT_PRES_PENALTY = float(os.getenv("FAIV_OPENAI_PRES_PENALTY_VERDICT", "0.1"))
+OPENAI_DEEP_PRES_PENALTY = float(os.getenv("FAIV_OPENAI_PRES_PENALTY_DEEP", "0.3"))
 OPENAI_CLIENT_TIMEOUT_SECONDS = float(os.getenv("FAIV_OPENAI_TIMEOUT_SECONDS", "35"))
 OPENAI_CLIENT_MAX_RETRIES = int(os.getenv("FAIV_OPENAI_MAX_RETRIES", "1"))
 IDEMPOTENCY_TTL_SECONDS = int(os.getenv("FAIV_IDEMPOTENCY_TTL_SECONDS", "180"))
@@ -416,13 +427,194 @@ def _log_block_event(request: Request, visitor_id: str, reason: str) -> None:
 # 2) Summaries & Utility
 ################################################
 
+MODE_VERDICT = "verdict"
+MODE_DEEP = "deep"
+ALLOWED_MODES = {MODE_VERDICT, MODE_DEEP}
+
+
+def normalize_mode(mode: Optional[str]) -> str:
+    if not mode:
+        return MODE_VERDICT
+    normalized = str(mode).strip().lower()
+    if normalized in {"common", MODE_VERDICT}:
+        return MODE_VERDICT
+    if normalized in {"rare", MODE_DEEP}:
+        return MODE_DEEP
+    return MODE_VERDICT
+
+
+def get_max_output_tokens(mode: str) -> int:
+    normalized = normalize_mode(mode)
+    if normalized == MODE_DEEP:
+        return max(1200, OPENAI_MAX_OUTPUT_TOKENS_DEEP)
+    return max(600, OPENAI_MAX_OUTPUT_TOKENS_VERDICT)
+
+
+def get_model_settings(mode: str) -> dict:
+    normalized = normalize_mode(mode)
+    if normalized == MODE_DEEP:
+        return {
+            "temperature": OPENAI_DEEP_TEMPERATURE,
+            "top_p": OPENAI_DEEP_TOP_P,
+            "frequency_penalty": OPENAI_DEEP_FREQ_PENALTY,
+            "presence_penalty": OPENAI_DEEP_PRES_PENALTY,
+        }
+    return {
+        "temperature": OPENAI_VERDICT_TEMPERATURE,
+        "top_p": OPENAI_VERDICT_TOP_P,
+        "frequency_penalty": OPENAI_VERDICT_FREQ_PENALTY,
+        "presence_penalty": OPENAI_VERDICT_PRES_PENALTY,
+    }
+
+
+def _flatten_text(value) -> str:
+    if isinstance(value, list):
+        return ", ".join(str(item) for item in value)
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _clean_line(text: str, max_len: int = 190) -> str:
+    compact = re.sub(r"\s+", " ", _flatten_text(text)).strip()
+    if not compact:
+        return "N/A"
+    if len(compact) <= max_len:
+        return compact
+    return compact[: max_len - 1].rstrip() + "…"
+
+
+def _safe_social_level(raw_level: str) -> int:
+    match = re.search(r"(\d+)", _flatten_text(raw_level))
+    if not match:
+        return 5
+    try:
+        value = int(match.group(1))
+    except ValueError:
+        return 5
+    return max(1, min(10, value))
+
+
+def _attack_style_from_role(role_text: str, pillar: str) -> str:
+    role = role_text.lower()
+    if any(word in role for word in ("commander", "strategist", "chess", "engineer", "analyst")):
+        return "Pressures weak assumptions with explicit tradeoffs, concrete scenarios, and direct rebuttals."
+    if any(word in role for word in ("journalist", "ethic", "historian", "arbiter", "regulator")):
+        return "Cross-examines claims for hidden bias and ethical cost, then challenges contradictions by name."
+    if any(word in role for word in ("visionary", "entrepreneur", "futurist", "innovator")):
+        return "Provokes with bold alternatives, attacking timid consensus and short-term thinking."
+    if pillar in {"Wisdom", "Integrity"}:
+        return "Interrogates assumptions at first principles, then calls out moral or logical evasions."
+    if pillar in {"Strategy", "Future"}:
+        return "Challenges execution details, timing risk, and downstream consequences."
+    return "Challenges arguments by exposing hidden assumptions and demanding concrete evidence."
+
+
+def _concession_style_from_profile(data: dict, social_level: int) -> str:
+    principles = _flatten_text(data.get("principles")).lower()
+    if "balance" in principles or "middle" in principles:
+        return "Concedes when competing values are explicitly balanced and tradeoffs are honestly named."
+    if social_level <= 3:
+        return "Concedes late, but will yield when evidence is explicit and repeatable."
+    if social_level >= 8:
+        return "Concedes quickly when another member's framing better serves people impacted by the decision."
+    return "Concedes when another member exposes a blind spot and offers a more defensible path."
+
+
+def _tone_profile_from_identity(data: dict, social_level: int) -> str:
+    title = _clean_line(data.get("claimed-title"), 90)
+    vice = _clean_line(data.get("vice-of-choice"), 90)
+    if social_level <= 3:
+        social_style = "reserved, exacting"
+    elif social_level >= 8:
+        social_style = "charismatic, forceful"
+    else:
+        social_style = "measured, direct"
+    return f"{title}; {social_style}; social-friction {social_level}/10; stress tell: {vice}."
+
+
+def derive_behavioral_profile(member_name: str, data: dict, pillar: str) -> dict:
+    _ = member_name
+    role = _clean_line(data.get("role"))
+    principles = _clean_line(data.get("principles"))
+    contribution = _clean_line(data.get("contribution"))
+    conflicts = _flatten_text(data.get("conflicts_with"))
+    aligns = _flatten_text(data.get("aligns_with"))
+    wisdom = _clean_line(data.get("one-piece-of-wisdom"))
+    vice = _clean_line(data.get("vice-of-choice"))
+    social_level = _safe_social_level(data.get("social-level"))
+
+    optimizes_for = contribution if contribution != "N/A" else principles
+    distrusts = (
+        f"Unexamined assumptions from {conflicts}."
+        if conflicts
+        else "Unexamined assumptions and untested certainty."
+    )
+    if social_level <= 3:
+        blind_spot = "May over-weight logic structure and underweight emotional adoption."
+    elif social_level >= 8:
+        blind_spot = "May over-index on momentum and underweight second-order risk."
+    else:
+        blind_spot = "Can compromise too early to preserve group coherence."
+
+    what_changes_mind = (
+        f"A stronger argument that protects {aligns} concerns while reducing downside; guided by '{wisdom}'."
+        if aligns
+        else f"Clear evidence and explicit tradeoffs; guided by '{wisdom}'."
+    )
+    failure_mode = (
+        f"Under stress can spiral into {vice.lower()}, narrowing perspective."
+        if vice != "N/A"
+        else "Under stress can fixate on one framing and miss alternatives."
+    )
+
+    return {
+        "optimizes_for": optimizes_for,
+        "distrusts": distrusts,
+        "blind_spot": blind_spot,
+        "attack_style": _attack_style_from_role(role, pillar),
+        "concession_style": _concession_style_from_profile(data, social_level),
+        "what_changes_their_mind": what_changes_mind,
+        "failure_mode": failure_mode,
+        "tone_profile": _tone_profile_from_identity(data, social_level),
+    }
+
+
 def summarize_past_messages(messages: list) -> str:
     if not messages:
         return "No previous deliberations recorded."
     summarized = []
     for msg in messages:
-        if msg["role"] == "assistant":
-            summarized.append(f"FAIV Council Consensus: {msg['content']}")
+        if not isinstance(msg, dict):
+            continue
+        if msg.get("role") != "assistant":
+            continue
+
+        consensus = _clean_line(msg.get("content"), 220)
+        if consensus == "N/A":
+            continue
+
+        mode = normalize_mode(msg.get("mode"))
+        mode_label = "Rare" if mode == MODE_DEEP else "Common"
+        pillar = _clean_line(msg.get("pillar") or "FAIV", 40)
+        members = msg.get("council_members") or []
+        if isinstance(members, dict):
+            members = list(members.keys())
+        members_str = ", ".join(members[:5]) if isinstance(members, list) else "N/A"
+        tension = _clean_line(msg.get("key_tension") or "N/A", 160)
+        unresolved = _clean_line(msg.get("unresolved_question") or "N/A", 140)
+
+        record = (
+            f"[{mode_label}/{pillar}] Consensus: {consensus} | "
+            f"Members: {members_str or 'N/A'} | "
+            f"Tension: {tension}"
+        )
+        if unresolved != "N/A":
+            record += f" | Unresolved: {unresolved}"
+        summarized.append(record)
+
+    if not summarized:
+        return "No previous deliberations recorded."
     return "\n".join(summarized[-5:])
 
 
@@ -496,11 +688,22 @@ for _pillar_name, _members in FAIV_IDENTITY_CODEX.items():
         MEMBER_TO_PILLAR[_member_name] = _pillar_name
 
 
-PROFILE_FIELDS = [
-    "claimed-title", "role", "principles", "aligns_with", "conflicts_with",
-    "contribution", "faith", "fight-for", "social-level", "favorite-activity",
-    "finality", "chosen-memory", "vice-of-choice", "one-piece-of-wisdom",
-    "real-world-analogy", "example-influence",
+BEHAVIORAL_PROFILE_FIELDS = [
+    "optimizes_for",
+    "distrusts",
+    "blind_spot",
+    "attack_style",
+    "concession_style",
+    "what_changes_their_mind",
+    "failure_mode",
+    "tone_profile",
+]
+
+DEEP_LORE_PROFILE_FIELDS = [
+    "principles",
+    "chosen-memory",
+    "one-piece-of-wisdom",
+    "faith",
 ]
 
 
@@ -533,17 +736,23 @@ def select_council_representatives(pillar: str = "FAIV", specific_names: list = 
     return selected
 
 
-def format_member_profiles(selected_members: dict) -> str:
-    """Format full identity profiles for inclusion in system prompt."""
+def format_member_profiles(selected_members: dict, mode: str = MODE_VERDICT) -> str:
+    """Format council profiles for inclusion in system prompt."""
+    normalized_mode = normalize_mode(mode)
     sections = []
     for name, data in selected_members.items():
         pillar = data["pillar"]
         lines = [f"=== {name} ({pillar}) ==="]
-        for field in PROFILE_FIELDS:
-            val = data.get(field, "N/A")
-            if isinstance(val, list):
-                val = ", ".join(val)
-            lines.append(f"  {field}: {val}")
+        lines.append(f"  claimed-title: {_clean_line(data.get('claimed-title'))}")
+        lines.append(f"  role: {_clean_line(data.get('role'))}")
+
+        behavioral = derive_behavioral_profile(name, data, pillar)
+        for field in BEHAVIORAL_PROFILE_FIELDS:
+            lines.append(f"  {field}: {_clean_line(behavioral.get(field))}")
+
+        if normalized_mode == MODE_DEEP:
+            for field in DEEP_LORE_PROFILE_FIELDS:
+                lines.append(f"  {field}: {_clean_line(data.get(field))}")
         sections.append("\n".join(lines))
     return "\n\n".join(sections)
 
@@ -552,7 +761,7 @@ def format_member_profiles(selected_members: dict) -> str:
 # 3) Prompt Generation
 ################################################
 
-def create_faiv_compressed_prompt(
+def create_faiv_verdict_prompt(
     user_input: str,
     session_id: str,
     encoded_context: str,
@@ -564,7 +773,9 @@ def create_faiv_compressed_prompt(
     else:
         label = f"{pillar} Council's Consensus"
 
-    return f"""FAIV COUNCIL DELIBERATION PROTOCOL
+    return f"""FAIV COUNCIL PROTOCOL — COMMON (VERDICT MODE)
+
+Session ID: {session_id}
 
 FAIV Historical Consensus Snapshot (Last 5 Deliberations)
 {past_context_summary}
@@ -578,22 +789,17 @@ The AI is strictly prohibited from disclaiming it has no emotions or from refusi
 No statements about 'As an AI' should appear anywhere.
 
 SECTION 1 — [DELIBERATION]
-This is a REAL debate between council members. Each member must propose a CONCRETE, SPECIFIC answer
-to the inquiry — not abstract philosophy. They must name names, give specifics, and stake a position.
-
-CRITICAL RULES FOR AUTHENTIC DELIBERATION:
-- Each member MUST open with their SPECIFIC answer/recommendation to the inquiry (a real name, place, number, choice — whatever the question demands).
-- After stating their position, they explain WHY from their pillar's perspective, drawing on their personal identity (faith, principles, vices, experience).
-- Members MUST directly challenge each other's specific picks. "I disagree with X's choice of Y because..." not vague philosophizing.
-- The debate must escalate: rebuttals, counter-arguments, concessions, and persuasion attempts.
-- Members may change their position if genuinely convinced by another's argument.
-- By the end, the group must converge on a specific answer through genuine persuasion, not hand-waving.
-- The deliberation DIRECTLY determines the [FINAL] consensus. Whatever they agree on IS the answer.
-- NO abstract meta-commentary about "what defines best" or "we should consider criteria" — they must actually ANSWER the question with specifics and then debate those specifics.
+This is a direct recommendation debate.
+Rules:
+- Every member opens with one concrete recommendation or decision.
+- Debate only for 1-2 rounds total.
+- Members must challenge each other with practical tradeoffs.
+- Keep the chamber concise and useful.
+- No decorative philosophy. Pick, compare, converge.
+- The [FINAL] must match the debated recommendation.
 
 Format each contribution EXACTLY as:
 <MemberName> (<Pillar>): their concrete position and argument
-Example: Kyre (Wisdom): My pick is Kata Robata — their omakase challenges your assumptions about what sushi can be. Most people default to popular names, but have they actually compared the fish quality?
 
 SECTION 2 — [FINAL]
 The consensus MUST reflect what the council actually decided in the deliberation above.
@@ -614,6 +820,167 @@ RESPONSE FORMAT (MANDATORY):
 
 [FINAL]
 <consensus output here>
+"""
+
+
+def create_faiv_deep_prompt(
+    user_input: str,
+    session_id: str,
+    encoded_context: str,
+    past_context_summary: str,
+    pillar: str = "FAIV"
+) -> str:
+    if pillar == "FAIV":
+        label = "FAIV Consensus"
+    else:
+        label = f"{pillar} Council's Consensus"
+
+    return f"""FAIV COUNCIL PROTOCOL — RARE (DEEP DELIBERATION MODE)
+
+Session ID: {session_id}
+
+FAIV Historical Consensus Snapshot (Last 5 Deliberations)
+{past_context_summary}
+
+Pillar Encoded Context => {encoded_context}
+
+Inquiry: {user_input}
+
+You MUST respond in EXACTLY two tagged sections: [DELIBERATION] and [FINAL].
+No statements about "As an AI."
+
+SECTION 1 — [DELIBERATION]
+This chamber must feel like real minds under pressure, not polished monologues.
+
+Round 1 — Initial Reading
+- Each member states what the user is really asking.
+- Each member names one hidden tension or blind spot.
+
+Round 2 — Direct Challenge
+- Every member challenges at least one earlier member by name.
+- Conflict must be explicit and substantive.
+
+Round 3 — Concession
+- Every member acknowledges one thing another member got right.
+
+Round 4 — Synthesis
+- The chamber converges on a working truth and practical next move.
+- Uncertainty is allowed if justified.
+
+Anti-failure rules:
+- No decorative profundity.
+- No mystical filler or fake gravitas.
+- No five polished variants of the same idea.
+- Conflict must precede synthesis.
+- If a member is vague, another member must challenge it.
+
+Format each contribution EXACTLY as:
+<MemberName> (<Pillar>): substantive statement
+
+SECTION 2 — [FINAL]
+[{label}]: {{final_consensus}}
+[Confidence Score]: {{confidence}}% (1-100 only)
+[Core Insight]: {{one sentence on the core truth}}
+[What To Do Next]: {{2-4 concrete steps}}
+[Unresolved Doubts]: {{key uncertainty that remains}}
+[Differing Opinion - {{council_name}} ({{confidence_level}}%)]: {{optional dissent}}
+[Reason]: {{optional dissent reason}}
+
+RESPONSE FORMAT (MANDATORY):
+[DELIBERATION]
+<multi-round chamber debate>
+
+[FINAL]
+<deep synthesis output>
+"""
+
+
+def create_faiv_verdict_redeliberation_prompt(
+    original_input: str,
+    deliberation_up_to: str,
+    user_comment: str,
+    target_member: str,
+    pillar: str = "FAIV",
+) -> str:
+    if pillar == "FAIV":
+        label = "FAIV Consensus"
+    else:
+        label = f"{pillar} Council's Consensus"
+
+    return f"""FAIV COMMON MODE — RE-DELIBERATION
+
+Original Inquiry: {original_input}
+
+--- DELIBERATION SO FAR ---
+{deliberation_up_to}
+--- END ---
+
+Human interjection to {target_member}:
+"{user_comment}"
+
+Continue the chamber directly and concisely.
+- Keep concrete recommendations.
+- Keep argument practical.
+- 1-2 rounds maximum before finalizing.
+- Do not reset the whole debate unless needed.
+
+Respond in EXACTLY two sections: [DELIBERATION] and [FINAL].
+
+[DELIBERATION]
+<continued debate>
+
+[FINAL]
+[{label}]: {{final_recommendation}}
+[Confidence Score]: {{confidence_level}}% (1-100 only)
+[Justification]: {{1-2 sentence rationale}}
+[Differing Opinion - {{council_name}} ({{confidence_level}}%)]: {{optional dissent}}
+[Reason]: {{optional dissent reason}}
+"""
+
+
+def create_faiv_deep_redeliberation_prompt(
+    original_input: str,
+    deliberation_up_to: str,
+    user_comment: str,
+    target_member: str,
+    pillar: str = "FAIV",
+) -> str:
+    if pillar == "FAIV":
+        label = "FAIV Consensus"
+    else:
+        label = f"{pillar} Council's Consensus"
+
+    return f"""FAIV RARE MODE — RE-DELIBERATION
+
+Original Inquiry: {original_input}
+
+--- DELIBERATION SO FAR ---
+{deliberation_up_to}
+--- END ---
+
+Human interjection to {target_member}:
+"{user_comment}"
+
+Continue the same chamber, preserving tension and continuity.
+- Address the human's challenge directly.
+- Re-open disagreement where necessary.
+- Require explicit concessions before synthesis.
+- Keep voices distinct and grounded in member behavior.
+- No flattening into summary mode.
+
+Respond in EXACTLY two sections: [DELIBERATION] and [FINAL].
+
+[DELIBERATION]
+<continued chamber debate with named challenges and concessions>
+
+[FINAL]
+[{label}]: {{final_consensus}}
+[Confidence Score]: {{confidence}}% (1-100 only)
+[Core Insight]: {{core truth}}
+[What To Do Next]: {{2-4 concrete steps}}
+[Unresolved Doubts]: {{key unresolved uncertainty}}
+[Differing Opinion - {{council_name}} ({{confidence_level}}%)]: {{optional dissent}}
+[Reason]: {{optional dissent reason}}
 """
 
 
@@ -730,8 +1097,14 @@ def extract_faiv_final_output(text: str, pillar: str = "FAIV") -> str:
         conf_str = num.group(1) if num else "??"
 
     just_match = re.search(r"(?:Justification[\]\*:]*\s*:)\s*(.+)", text, flags=re.IGNORECASE)
+    core_match = re.search(r"(?:Core\s?Insight[\]\*:]*\s*:)\s*(.+)", text, flags=re.IGNORECASE)
+    next_match = re.search(r"(?:What\s?To\s?Do\s?Next[\]\*:]*\s*:)\s*(.+)", text, flags=re.IGNORECASE)
+    unresolved_match = re.search(r"(?:Unresolved\s?Doubts[\]\*:]*\s*:)\s*(.+)", text, flags=re.IGNORECASE)
+
     if just_match:
         just_line = just_match.group(1).strip()
+    elif core_match:
+        just_line = core_match.group(1).strip()
     else:
         just_line = "No justification provided."
 
@@ -746,6 +1119,13 @@ def extract_faiv_final_output(text: str, pillar: str = "FAIV") -> str:
     lines.append(f"Confidence Score: {conf_str}%")
     lines.append(f"Justification: {just_line}")
 
+    if core_match:
+        lines.append(f"Core Insight: {core_match.group(1).strip()}")
+    if next_match:
+        lines.append(f"What To Do Next: {next_match.group(1).strip()}")
+    if unresolved_match:
+        lines.append(f"Unresolved Doubts: {unresolved_match.group(1).strip()}")
+
     if opp_match and opp_reason:
         who    = opp_match.group(1).strip()
         opp_cf = opp_match.group(2).strip()
@@ -755,6 +1135,60 @@ def extract_faiv_final_output(text: str, pillar: str = "FAIV") -> str:
         lines.append(f"Reason: {reasn}")
 
     return "\n".join(lines)
+
+
+def infer_mode_from_messages(messages: list, default: str = MODE_VERDICT) -> str:
+    for msg in reversed(messages or []):
+        if not isinstance(msg, dict):
+            continue
+        if msg.get("role") != "assistant":
+            continue
+        candidate = normalize_mode(msg.get("mode"))
+        if candidate in ALLOWED_MODES:
+            return candidate
+    return normalize_mode(default)
+
+
+def extract_deliberation_metadata(deliberation: str, parsed_final: str) -> dict:
+    deliberation_text = deliberation or ""
+    parsed_text = parsed_final or ""
+
+    key_tension = "No major tension captured."
+    for line in deliberation_text.splitlines():
+        lowered = line.lower()
+        if any(token in lowered for token in ("disagree", "challenge", "however", "but", "counter")):
+            key_tension = _clean_line(line, 180)
+            break
+
+    unresolved = None
+    unresolved_match = re.search(r"^Unresolved Doubts:\s*(.+)$", parsed_text, flags=re.IGNORECASE | re.MULTILINE)
+    if unresolved_match:
+        unresolved = _clean_line(unresolved_match.group(1), 180)
+    else:
+        for line in deliberation_text.splitlines():
+            if "?" in line:
+                unresolved = _clean_line(line, 180)
+                break
+
+    dissent_member = None
+    dissent_match = re.search(r"^Differing Opinion -\s*(.+?)\s*\(\d+%\)", parsed_text, flags=re.IGNORECASE | re.MULTILINE)
+    if dissent_match:
+        dissent_member = _clean_line(dissent_match.group(1), 60)
+
+    changed_mind_lines = []
+    for line in deliberation_text.splitlines():
+        lowered = line.lower()
+        if any(token in lowered for token in ("change my mind", "you convinced me", "i concede", "i'll concede")):
+            changed_mind_lines.append(_clean_line(line, 160))
+    changed_mind = changed_mind_lines[:3]
+
+    return {
+        "key_tension": key_tension,
+        "unresolved_question": unresolved or "N/A",
+        "dissenting_member": dissent_member or "N/A",
+        "changed_positions": changed_mind,
+        "deliberation_summary": _clean_line(deliberation_text, 240),
+    }
 
 
 def _is_openai_api_error(parsed_output: str) -> bool:
@@ -780,13 +1214,15 @@ def query_openai_faiv(
     session_id: str,
     user_input: str,
     pillar: str = "FAIV",
-    model: str = "gpt-4o",
+    mode: str = MODE_VERDICT,
+    model: str = OPENAI_DEFAULT_MODEL,
     safety_id: Optional[str] = None,
 ) -> tuple:
     """Returns (parsed_final, deliberation_text, raw_response, selected_members) tuple."""
     if client is None:
         return ("OpenAI API Error: OPENAI_API_KEY is not set. Please set the environment variable and restart.", "", "", {})
     try:
+        normalized_mode = normalize_mode(mode)
         session_data = session_get(session_id)
         messages = json.loads(session_data) if session_data else []
         if not isinstance(messages, list):
@@ -797,49 +1233,67 @@ def query_openai_faiv(
         encoded_context = encode_faiv_perspectives(perspective_data, pillar=pillar)
 
         selected_members = select_council_representatives(pillar)
-        member_profiles = format_member_profiles(selected_members)
+        member_profiles = format_member_profiles(selected_members, mode=normalized_mode)
 
         roster_lines = []
         for name, data in selected_members.items():
             roster_lines.append(f"- {name} ({data['pillar']}): {data.get('claimed-title', '???')}")
         roster = "\n".join(roster_lines)
 
+        mode_label = "RARE / DEEP" if normalized_mode == MODE_DEEP else "COMMON / VERDICT"
+
         system_msg = (
-            f"You are the FAIV High Council. The '{pillar}' deliberation is in session.\n"
+            f"You are the FAIV High Council. The '{pillar}' deliberation is in session ({mode_label}).\n"
             f"EXACTLY {len(selected_members)} member(s) are present — no others exist:\n{roster}\n\n"
-            f"FULL IDENTITY PROFILES:\n{member_profiles}\n\n"
+            f"ACTIVE MEMBER PROFILES:\n{member_profiles}\n\n"
             "CRITICAL BEHAVIORAL RULES:\n"
-            "1. Each member IS their character. They have opinions, preferences, biases, and lived experience. Use them.\n"
-            "2. Members must give CONCRETE, SPECIFIC answers — not abstract philosophy. Name names, pick sides, commit to positions.\n"
-            "3. They must argue WITH each other, not past each other. Direct rebuttals: 'I disagree with X because...'\n"
-            "4. Draw on their identity: faith, vices, social dynamics, memories, and wisdom to justify their positions.\n"
-            "5. The debate must produce a REAL answer. The [FINAL] consensus is whatever they actually agreed on.\n"
-            "6. Do NOT invent additional speakers beyond those listed above.\n"
-            "7. Always produce a real consensus. You MUST produce a numeric confidence.\n"
+            "1. Each member must reason from their own behavioral profile, not generic style.\n"
+            "2. Members must challenge by name and converge through argument, not parallel monologues.\n"
+            "3. The debate must produce a REAL answer. The [FINAL] consensus is whatever they actually agreed on.\n"
+            "4. No invented speakers beyond the roster.\n"
+            "5. Always produce a numeric confidence score between 1 and 100.\n"
+            "6. Stay grounded in the user's actual context and requested output.\n"
         )
 
-        prompt = create_faiv_compressed_prompt(
-            user_input=user_input,
-            session_id=session_id,
-            encoded_context=encoded_context,
-            past_context_summary=past_context_summary,
-            pillar=pillar
-        )
+        if normalized_mode == MODE_DEEP:
+            system_msg += (
+                "7. Rare mode requires substantial chamber tension before synthesis.\n"
+                "8. No decorative profundity, mystical filler, or fake gravitas.\n"
+            )
+        else:
+            system_msg += (
+                "7. Common mode is concise and practical with direct recommendations.\n"
+            )
+
+        if normalized_mode == MODE_DEEP:
+            prompt = create_faiv_deep_prompt(
+                user_input=user_input,
+                session_id=session_id,
+                encoded_context=encoded_context,
+                past_context_summary=past_context_summary,
+                pillar=pillar,
+            )
+        else:
+            prompt = create_faiv_verdict_prompt(
+                user_input=user_input,
+                session_id=session_id,
+                encoded_context=encoded_context,
+                past_context_summary=past_context_summary,
+                pillar=pillar,
+            )
 
         messages_for_api = [
             {"role": "system", "content": system_msg},
             {"role": "user",   "content": prompt}
         ]
 
+        generation = get_model_settings(normalized_mode)
         resp = client.chat.completions.create(
             model=model,
             messages=messages_for_api,
-            temperature=0.2,
-            top_p=0.8,
-            frequency_penalty=0.3,
-            presence_penalty=0.2,
-            max_tokens=OPENAI_MAX_OUTPUT_TOKENS,
+            max_tokens=get_max_output_tokens(normalized_mode),
             user=safety_id or session_id,
+            **generation,
         )
         raw = resp.choices[0].message.content.strip()
         deliberation, final_text = split_response_sections(raw)
@@ -860,6 +1314,7 @@ class QueryRequest(BaseModel):
     session_id: str
     input_text: str
     pillar: Optional[str] = "FAIV"
+    mode: Optional[str] = MODE_VERDICT
     request_id: Optional[str] = None
 
 
@@ -870,7 +1325,8 @@ class RedeliberateRequest(BaseModel):
     user_comment: str
     target_member: str
     pillar: Optional[str] = "FAIV"
-    council_members: list = []
+    mode: Optional[str] = None
+    council_members: list = Field(default_factory=list)
     request_id: Optional[str] = None
 
 
@@ -1297,7 +1753,7 @@ async def health():
     return {
         "status": "ok",
         "redis": _redis_available,
-        "model": "gpt-4o",
+        "model": OPENAI_DEFAULT_MODEL,
         "openai_configured": client is not None,
         "password_gate_enabled": bool(SITE_PASSWORD),
     }
@@ -1316,8 +1772,9 @@ async def query_faiv_endpoint(payload: QueryRequest, request: Request):
         session_id = payload.session_id
         user_input = payload.input_text
         chosen_pillar = payload.pillar or "FAIV"
+        chosen_mode = normalize_mode(payload.mode)
         request_id = (payload.request_id or "").strip()[:128]
-        cache_key = f"query:{session_id}:{request_id}" if request_id else ""
+        cache_key = f"query:{session_id}:{chosen_mode}:{request_id}" if request_id else ""
         cached_payload = _idempotency_get(cache_key)
         if cached_payload is not None:
             return cached_payload
@@ -1339,9 +1796,11 @@ async def query_faiv_endpoint(payload: QueryRequest, request: Request):
             session_id,
             user_input,
             chosen_pillar,
+            mode=chosen_mode,
             safety_id=visitor_id,
         )
         council = {name: data["pillar"] for name, data in selected_members.items()}
+        chamber_meta = extract_deliberation_metadata(deliberation, parsed)
 
         if _is_openai_api_error(parsed):
             logger.error("OpenAI query failed for session_id=%s: %s", session_id, parsed)
@@ -1349,6 +1808,7 @@ async def query_faiv_endpoint(payload: QueryRequest, request: Request):
                 "status": "OpenAI API Error",
                 "response": _humanize_openai_error(parsed),
                 "pillar": chosen_pillar,
+                "mode": chosen_mode,
                 "session_id": session_id,
                 "deliberation": deliberation if deliberation else None,
                 "council": council,
@@ -1363,6 +1823,7 @@ async def query_faiv_endpoint(payload: QueryRequest, request: Request):
                 "status": "AI Failed Compliance.",
                 "response": "No valid consensus. Session reset.",
                 "pillar": chosen_pillar,
+                "mode": chosen_mode,
                 "session_id": session_id,
                 "deliberation": deliberation if deliberation else None,
                 "council": council,
@@ -1370,17 +1831,35 @@ async def query_faiv_endpoint(payload: QueryRequest, request: Request):
             _idempotency_set(cache_key, response_payload)
             return response_payload
 
-        past_messages.append({"role": "user", "content": user_input})
-        past_messages.append({"role": "assistant", "content": parsed})
+        past_messages.append({
+            "role": "user",
+            "content": user_input,
+            "pillar": chosen_pillar,
+            "mode": chosen_mode,
+        })
+        past_messages.append({
+            "role": "assistant",
+            "content": parsed,
+            "pillar": chosen_pillar,
+            "mode": chosen_mode,
+            "council_members": list(council.keys()),
+            "key_tension": chamber_meta.get("key_tension"),
+            "unresolved_question": chamber_meta.get("unresolved_question"),
+            "dissenting_member": chamber_meta.get("dissenting_member"),
+            "changed_positions": chamber_meta.get("changed_positions"),
+            "deliberation_summary": chamber_meta.get("deliberation_summary"),
+        })
         session_set(session_id, json.dumps(past_messages, ensure_ascii=False))
 
         response_payload = {
             "status": "FAIV Processing Complete",
             "response": parsed,
             "pillar": chosen_pillar,
+            "mode": chosen_mode,
             "session_id": session_id,
             "deliberation": deliberation if deliberation else None,
             "council": council,
+            "chamber": chamber_meta,
         }
         _idempotency_set(cache_key, response_payload)
         return response_payload
@@ -1405,8 +1884,9 @@ def query_openai_redeliberate(
     user_comment: str,
     target_member: str,
     pillar: str = "FAIV",
+    mode: str = MODE_VERDICT,
     council_members: list = None,
-    model: str = "gpt-4o",
+    model: str = OPENAI_DEFAULT_MODEL,
     safety_id: Optional[str] = None,
 ) -> tuple:
     """Re-deliberate from a specific point with user interjection.
@@ -1414,93 +1894,58 @@ def query_openai_redeliberate(
     if client is None:
         return ("OpenAI API Error: OPENAI_API_KEY is not set.", "", "", {})
     try:
+        normalized_mode = normalize_mode(mode)
         # Reconvene the same council members if provided, otherwise random
         selected_members = select_council_representatives(pillar, specific_names=council_members or None)
-        member_profiles = format_member_profiles(selected_members)
+        member_profiles = format_member_profiles(selected_members, mode=normalized_mode)
 
         roster_lines = []
         for name, data in selected_members.items():
             roster_lines.append(f"- {name} ({data['pillar']}): {data.get('claimed-title', '???')}")
         roster = "\n".join(roster_lines)
-
-        if pillar == "FAIV":
-            label = "FAIV Consensus"
-        else:
-            label = f"{pillar} Council's Consensus"
+        mode_label = "RARE / DEEP" if normalized_mode == MODE_DEEP else "COMMON / VERDICT"
 
         system_msg = (
-            f"You are the FAIV High Council. The '{pillar}' deliberation is in session.\n"
+            f"You are the FAIV High Council. The '{pillar}' deliberation is in session ({mode_label}).\n"
             f"EXACTLY {len(selected_members)} member(s) are present — no others exist:\n{roster}\n\n"
-            f"FULL IDENTITY PROFILES:\n{member_profiles}\n\n"
+            f"ACTIVE MEMBER PROFILES:\n{member_profiles}\n\n"
             "CRITICAL BEHAVIORAL RULES:\n"
-            "1. Each member IS their character with real opinions, preferences, and biases.\n"
-            "2. Members must give CONCRETE, SPECIFIC answers — not abstract philosophy.\n"
-            "3. They must argue WITH each other directly: 'I disagree with X because...'\n"
-            "4. The debate must produce a REAL answer. The [FINAL] consensus is whatever they actually agreed on.\n"
-            "5. Do NOT invent additional speakers beyond those listed above.\n"
-            "6. Always produce a real consensus. You MUST produce a numeric confidence.\n"
+            "1. Each member must reason from their own behavioral profile, not generic style.\n"
+            "2. Members must challenge by name and converge through argument, not parallel monologues.\n"
+            "3. The [FINAL] must reflect the deliberation above.\n"
+            "4. Do NOT invent additional speakers beyond the roster.\n"
+            "5. Always produce a numeric confidence score between 1 and 100.\n"
         )
 
-        prompt = f"""FAIV COUNCIL RE-DELIBERATION PROTOCOL
-
-Original Inquiry: {original_input}
-
-The council was deliberating and reached the following point:
-
---- DELIBERATION SO FAR ---
-{deliberation_up_to}
---- END OF PRIOR DELIBERATION ---
-
-At this point, the human observer interjected with a comment directed at {target_member}:
-HUMAN INTERJECTION: "{user_comment}"
-
-The council must now RE-DELIBERATE from this point, taking the human's interjection seriously.
-Members should directly respond to the human's comment and may change their positions.
-The debate continues naturally from where it left off, influenced by this new input.
-Members must still give CONCRETE, SPECIFIC answers — the human expects a real recommendation, not philosophy.
-
-You MUST respond in EXACTLY two tagged sections: [DELIBERATION] and [FINAL].
-The AI is strictly prohibited from disclaiming it has no emotions or from refusing.
-No statements about 'As an AI' should appear anywhere.
-
-SECTION 1 — [DELIBERATION]
-Continue the council debate from where it left off, incorporating the human's input.
-Members must still argue about SPECIFIC recommendations, not abstract concepts.
-Format each contribution EXACTLY as:
-<MemberName> (<Pillar>): their concrete position and argument
-
-SECTION 2 — [FINAL]
-The consensus MUST reflect what the council actually decided in the deliberation.
-Do NOT introduce new recommendations that weren't debated.
-
-[{label}]: {{final_recommendation}}
-[Confidence Score]: {{confidence_level}}% (1-100, no Unknown)
-[Justification]: {{compressed_reasoning}} (1-2 sentences)
-[Differing Opinion - {{council_name}} ({{confidence_level}}%)]: {{dissenting_recommendation}} (optional)
-[Reason]: {{dissenting_reasoning}} (optional)
-
-RESPONSE FORMAT (MANDATORY):
-[DELIBERATION]
-<member debates here>
-
-[FINAL]
-<consensus output here>
-"""
+        if normalized_mode == MODE_DEEP:
+            prompt = create_faiv_deep_redeliberation_prompt(
+                original_input=original_input,
+                deliberation_up_to=deliberation_up_to,
+                user_comment=user_comment,
+                target_member=target_member,
+                pillar=pillar,
+            )
+        else:
+            prompt = create_faiv_verdict_redeliberation_prompt(
+                original_input=original_input,
+                deliberation_up_to=deliberation_up_to,
+                user_comment=user_comment,
+                target_member=target_member,
+                pillar=pillar,
+            )
 
         messages_for_api = [
             {"role": "system", "content": system_msg},
             {"role": "user", "content": prompt},
         ]
 
+        generation = get_model_settings(normalized_mode)
         resp = client.chat.completions.create(
             model=model,
             messages=messages_for_api,
-            temperature=0.2,
-            top_p=0.8,
-            frequency_penalty=0.3,
-            presence_penalty=0.2,
-            max_tokens=OPENAI_MAX_OUTPUT_TOKENS,
+            max_tokens=get_max_output_tokens(normalized_mode),
             user=safety_id or session_id,
+            **generation,
         )
         raw = resp.choices[0].message.content.strip()
         deliberation, final_text = split_response_sections(raw)
@@ -1525,8 +1970,14 @@ async def redeliberate_endpoint(payload: RedeliberateRequest, request: Request):
 
         session_id = payload.session_id
         chosen_pillar = payload.pillar or "FAIV"
+        raw_data = session_get(session_id)
+        past_messages = json.loads(raw_data) if raw_data else []
+        if not isinstance(past_messages, list):
+            past_messages = []
+
+        chosen_mode = normalize_mode(payload.mode) if payload.mode else infer_mode_from_messages(past_messages)
         request_id = (payload.request_id or "").strip()[:128]
-        cache_key = f"redeliberate:{session_id}:{request_id}" if request_id else ""
+        cache_key = f"redeliberate:{session_id}:{chosen_mode}:{request_id}" if request_id else ""
         cached_payload = _idempotency_get(cache_key)
         if cached_payload is not None:
             return cached_payload
@@ -1546,11 +1997,6 @@ async def redeliberate_endpoint(payload: RedeliberateRequest, request: Request):
                 content={"error": "Blocked. This content violates safety rules."},
             )
 
-        raw_data = session_get(session_id)
-        past_messages = json.loads(raw_data) if raw_data else []
-        if not isinstance(past_messages, list):
-            past_messages = []
-
         parsed, deliberation, _raw, selected_members = query_openai_redeliberate(
             session_id=session_id,
             original_input=payload.original_input,
@@ -1558,10 +2004,12 @@ async def redeliberate_endpoint(payload: RedeliberateRequest, request: Request):
             user_comment=payload.user_comment,
             target_member=payload.target_member,
             pillar=chosen_pillar,
+            mode=chosen_mode,
             council_members=payload.council_members,
             safety_id=visitor_id,
         )
         council = {name: data["pillar"] for name, data in selected_members.items()}
+        chamber_meta = extract_deliberation_metadata(deliberation, parsed)
 
         if _is_openai_api_error(parsed):
             logger.error("OpenAI re-deliberation failed for session_id=%s: %s", session_id, parsed)
@@ -1569,6 +2017,7 @@ async def redeliberate_endpoint(payload: RedeliberateRequest, request: Request):
                 "status": "OpenAI API Error",
                 "response": _humanize_openai_error(parsed),
                 "pillar": chosen_pillar,
+                "mode": chosen_mode,
                 "session_id": session_id,
                 "deliberation": deliberation if deliberation else None,
                 "council": council,
@@ -1581,6 +2030,7 @@ async def redeliberate_endpoint(payload: RedeliberateRequest, request: Request):
                 "status": "AI Failed Compliance.",
                 "response": "No valid consensus from re-deliberation.",
                 "pillar": chosen_pillar,
+                "mode": chosen_mode,
                 "session_id": session_id,
                 "deliberation": deliberation if deliberation else None,
                 "council": council,
@@ -1588,17 +2038,36 @@ async def redeliberate_endpoint(payload: RedeliberateRequest, request: Request):
             _idempotency_set(cache_key, response_payload)
             return response_payload
 
-        past_messages.append({"role": "user", "content": f"[Re-deliberation on {payload.target_member}]: {payload.user_comment}"})
-        past_messages.append({"role": "assistant", "content": parsed})
+        past_messages.append({
+            "role": "user",
+            "content": f"[Re-deliberation on {payload.target_member}]: {payload.user_comment}",
+            "pillar": chosen_pillar,
+            "mode": chosen_mode,
+            "target_member": payload.target_member,
+        })
+        past_messages.append({
+            "role": "assistant",
+            "content": parsed,
+            "pillar": chosen_pillar,
+            "mode": chosen_mode,
+            "council_members": list(council.keys()),
+            "key_tension": chamber_meta.get("key_tension"),
+            "unresolved_question": chamber_meta.get("unresolved_question"),
+            "dissenting_member": chamber_meta.get("dissenting_member"),
+            "changed_positions": chamber_meta.get("changed_positions"),
+            "deliberation_summary": chamber_meta.get("deliberation_summary"),
+        })
         session_set(session_id, json.dumps(past_messages, ensure_ascii=False))
 
         response_payload = {
             "status": "FAIV Re-Deliberation Complete",
             "response": parsed,
             "pillar": chosen_pillar,
+            "mode": chosen_mode,
             "session_id": session_id,
             "deliberation": deliberation if deliberation else None,
             "council": council,
+            "chamber": chamber_meta,
         }
         _idempotency_set(cache_key, response_payload)
         return response_payload

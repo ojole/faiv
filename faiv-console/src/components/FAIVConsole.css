@@ -146,6 +146,15 @@ body {
 }
 
 /* The dropdown menu (unchanged) */
+.dropdown-slot {
+  position: relative;
+  display: inline-flex;
+}
+
+.dropdown-slot + .dropdown-slot {
+  margin-left: 6px;
+}
+
 .pillar-menu {
   position: absolute;
   top: 100%;
@@ -161,7 +170,7 @@ body {
   list-style: none;
   margin: 0;
   padding: 0;
-  width: 120px;
+  width: 128px;
   z-index: 9999;
 }
 .pillar-menu li {

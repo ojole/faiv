@@ -72,6 +72,24 @@ async function fetchWithRetry(url, options = {}, attempts = API_RETRY_ATTEMPTS) 
   throw lastErr || new Error("Unknown network error");
 }
 
+const PILLAR_OPTIONS = ["FAIV", "Wisdom", "Strategy", "Expansion", "Future", "Integrity"];
+const MODE_OPTIONS = [
+  { label: "Common", value: "verdict" },
+  { label: "Rare", value: "deep" },
+];
+
+function normalizeModeValue(value) {
+  const raw = String(value || "").trim().toLowerCase();
+  if (raw === "deep" || raw === "rare") return "deep";
+  return "verdict";
+}
+
+function modeLabel(modeValue) {
+  const normalized = normalizeModeValue(modeValue);
+  const found = MODE_OPTIONS.find((item) => item.value === normalized);
+  return found ? found.label : "Common";
+}
+
 /****************************************
  * 1) ASCII Loader Frames
  ****************************************/
@@ -191,6 +209,45 @@ function extractFinalOutput(response) {
             <div key={idx} className="console-line">
               <b>
                 <u>Justification:</u>
+              </b>{" "}
+              {val}
+            </div>
+          );
+        }
+
+        // CASE C2: "Core Insight:"
+        if (line.startsWith("Core Insight:")) {
+          const val = cleanStr(line.replace(/^Core Insight:/i, ""));
+          return (
+            <div key={idx} className="console-line">
+              <b>
+                <u>Core Insight:</u>
+              </b>{" "}
+              {val}
+            </div>
+          );
+        }
+
+        // CASE C3: "What To Do Next:"
+        if (line.startsWith("What To Do Next:")) {
+          const val = cleanStr(line.replace(/^What To Do Next:/i, ""));
+          return (
+            <div key={idx} className="console-line">
+              <b>
+                <u>What To Do Next:</u>
+              </b>{" "}
+              {val}
+            </div>
+          );
+        }
+
+        // CASE C4: "Unresolved Doubts:"
+        if (line.startsWith("Unresolved Doubts:")) {
+          const val = cleanStr(line.replace(/^Unresolved Doubts:/i, ""));
+          return (
+            <div key={idx} className="console-line">
+              <b>
+                <u>Unresolved Doubts:</u>
               </b>{" "}
               {val}
             </div>
@@ -414,6 +471,15 @@ export default function FAIVConsole() {
   // Pillar dropdown
   const [selectedPillar, setSelectedPillar] = useState("FAIV");
   const [pillarOpen, setPillarOpen] = useState(false);
+  const [selectedMode, setSelectedMode] = useState(() => {
+    try {
+      if (typeof window === "undefined") return "verdict";
+      return normalizeModeValue(getStorageItem(localStorage, "faiv_mode", "verdict"));
+    } catch {
+      return "verdict";
+    }
+  });
+  const [modeOpen, setModeOpen] = useState(false);
 
   // Delete confirm modal
   const [showDeleteModal, setShowDeleteModal] = useState(false);
@@ -465,6 +531,8 @@ export default function FAIVConsole() {
   const [historyOpen, setHistoryOpen] = useState(false);
 
   const consoleBodyRef = useRef(null);
+  const modeDropdownRef = useRef(null);
+  const pillarDropdownRef = useRef(null);
 
   function scrollToElement(id) {
     const el = document.getElementById(id);
@@ -669,6 +737,28 @@ export default function FAIVConsole() {
     setStorageItem(localStorage, "faiv_replied_tiles", JSON.stringify(repliedTiles));
   }, [repliedTiles]);
 
+  useEffect(() => {
+    setStorageItem(localStorage, "faiv_mode", normalizeModeValue(selectedMode));
+  }, [selectedMode]);
+
+  useEffect(() => {
+    function handleOutsidePointer(event) {
+      if (modeDropdownRef.current && !modeDropdownRef.current.contains(event.target)) {
+        setModeOpen(false);
+      }
+      if (pillarDropdownRef.current && !pillarDropdownRef.current.contains(event.target)) {
+        setPillarOpen(false);
+      }
+    }
+
+    document.addEventListener("mousedown", handleOutsidePointer);
+    document.addEventListener("touchstart", handleOutsidePointer, { passive: true });
+    return () => {
+      document.removeEventListener("mousedown", handleOutsidePointer);
+      document.removeEventListener("touchstart", handleOutsidePointer);
+    };
+  }, []);
+
   // 4) Animate progress bar
   useEffect(() => {
     let interval;
@@ -828,6 +918,7 @@ export default function FAIVConsole() {
             session_id: activeSessionId,
             input_text: capturedInput,
             pillar: selectedPillar,
+            mode: selectedMode,
             request_id: requestId,
           }),
         })
@@ -855,6 +946,7 @@ export default function FAIVConsole() {
             deliberation: data.deliberation,
             originalInput: capturedInput,
             council: data.council || {},
+            mode: normalizeModeValue(data.mode || selectedMode),
           },
         }));
       }
@@ -891,6 +983,10 @@ export default function FAIVConsole() {
     const delibText = typeof delibData === "string" ? delibData : delibData.deliberation;
     const originalInput = typeof delibData === "string" ? "" : delibData.originalInput;
     const councilNames = typeof delibData === "string" ? [] : Object.keys(delibData.council || {});
+    const modeForReply =
+      typeof delibData === "string"
+        ? normalizeModeValue(selectedMode)
+        : normalizeModeValue(delibData.mode || selectedMode);
 
     // Reconstruct deliberation up to and including the clicked tile
     const entries = parseDeliberation(delibText);
@@ -928,6 +1024,7 @@ export default function FAIVConsole() {
             user_comment: comment,
             target_member: entry.member,
             pillar: selectedPillar,
+            mode: modeForReply,
             council_members: councilNames,
             request_id: requestId,
           }),
@@ -955,6 +1052,7 @@ export default function FAIVConsole() {
             deliberation: data.deliberation,
             originalInput: originalInput,
             council: data.council || {},
+            mode: normalizeModeValue(data.mode || modeForReply),
           },
         }));
       }
@@ -1128,30 +1226,64 @@ export default function FAIVConsole() {
               {historyOpen ? "×" : "☰"}
             </button>
 
-            {/* Pillar dropdown */}
-            <div
-              className="pillar-dropdown-wrapper"
-              onClick={() => setPillarOpen(!pillarOpen)}
-            >
-              <div className="pillar-dropdown-display">{selectedPillar}</div>
-              <div className="pillar-arrow">{pillarOpen ? "\u25B2" : "\u25BC"}</div>
+            {/* Mode dropdown (left of pillar) */}
+            <div className="dropdown-slot" ref={modeDropdownRef}>
+              <div
+                className="pillar-dropdown-wrapper"
+                onClick={() => {
+                  setModeOpen((prev) => !prev);
+                  setPillarOpen(false);
+                }}
+              >
+                <div className="pillar-dropdown-display">{modeLabel(selectedMode)}</div>
+                <div className="pillar-arrow">{modeOpen ? "\u25B2" : "\u25BC"}</div>
+              </div>
+              <ul className={`pillar-menu ${modeOpen ? "open" : ""}`}>
+                {MODE_OPTIONS.map((opt) => (
+                  <li
+                    key={opt.value}
+                    className={normalizeModeValue(selectedMode) === opt.value ? "selected" : ""}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setSelectedMode(opt.value);
+                      setModeOpen(false);
+                    }}
+                  >
+                    {opt.label}
+                  </li>
+                ))}
+              </ul>
             </div>
 
-            <ul className={`pillar-menu ${pillarOpen ? "open" : ""}`}>
-              {["FAIV","Wisdom","Strategy","Expansion","Future","Integrity"].map(opt => (
-                <li
-                  key={opt}
-                  className={opt === selectedPillar ? "selected" : ""}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setSelectedPillar(opt);
-                    setPillarOpen(false);
-                  }}
-                >
-                  {opt}
-                </li>
-              ))}
-            </ul>
+            {/* Pillar dropdown */}
+            <div className="dropdown-slot" ref={pillarDropdownRef}>
+              <div
+                className="pillar-dropdown-wrapper"
+                onClick={() => {
+                  setPillarOpen((prev) => !prev);
+                  setModeOpen(false);
+                }}
+              >
+                <div className="pillar-dropdown-display">{selectedPillar}</div>
+                <div className="pillar-arrow">{pillarOpen ? "\u25B2" : "\u25BC"}</div>
+              </div>
+
+              <ul className={`pillar-menu ${pillarOpen ? "open" : ""}`}>
+                {PILLAR_OPTIONS.map((opt) => (
+                  <li
+                    key={opt}
+                    className={opt === selectedPillar ? "selected" : ""}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setSelectedPillar(opt);
+                      setPillarOpen(false);
+                    }}
+                  >
+                    {opt}
+                  </li>
+                ))}
+              </ul>
+            </div>
 
             {/* Page title + reset */}
             <div style={{ marginLeft: "10px", marginRight: "auto", display: "flex", alignItems: "center" }}>
