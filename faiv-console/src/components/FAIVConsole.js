@@ -9,6 +9,8 @@ const API_BASE =
 const API_RETRY_ATTEMPTS = 4;
 const API_RETRY_DELAY_MS = 400;
 const API_FETCH_TIMEOUT_MS = 45000;
+const API_FETCH_TIMEOUT_VERDICT_MS = 110000;
+const API_FETCH_TIMEOUT_DEEP_MS = 300000;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -88,6 +90,12 @@ function modeLabel(modeValue) {
   const normalized = normalizeModeValue(modeValue);
   const found = MODE_OPTIONS.find((item) => item.value === normalized);
   return found ? found.label : "Common";
+}
+
+function getTimeoutForMode(modeValue) {
+  return normalizeModeValue(modeValue) === "deep"
+    ? API_FETCH_TIMEOUT_DEEP_MS
+    : API_FETCH_TIMEOUT_VERDICT_MS;
 }
 
 /****************************************
@@ -248,6 +256,19 @@ function extractFinalOutput(response) {
             <div key={idx} className="console-line">
               <b>
                 <u>Unresolved Doubts:</u>
+              </b>{" "}
+              {val}
+            </div>
+          );
+        }
+
+        // CASE C5: "Verdict State:"
+        if (line.startsWith("Verdict State:")) {
+          const val = cleanStr(line.replace(/^Verdict State:/i, ""));
+          return (
+            <div key={idx} className="console-line">
+              <b>
+                <u>Verdict State:</u>
               </b>{" "}
               {val}
             </div>
@@ -448,6 +469,104 @@ function getRepliedTileEntries(delibText, delibKey, repliedTiles) {
     }
   });
   return result;
+}
+
+function prettyVerdictState(rawValue) {
+  const value = String(rawValue || "").trim().toLowerCase();
+  if (!value) return "provisional";
+  return value.replace(/_/g, " ");
+}
+
+function RareChamberPanel({ chamber }) {
+  if (!chamber || typeof chamber !== "object") return null;
+  const verdictState = prettyVerdictState(chamber.verdict_state);
+  const terminals = Array.isArray(chamber.member_terminals) ? chamber.member_terminals : [];
+  const crossExams = Array.isArray(chamber.cross_examinations) ? chamber.cross_examinations : [];
+  const secretaryPackets =
+    chamber.secretary_packets && typeof chamber.secretary_packets === "object"
+      ? chamber.secretary_packets
+      : {};
+
+  return (
+    <details className="rare-chamber-details">
+      <summary className="rare-chamber-summary">Rare Chamber</summary>
+      <div className="rare-verdict-strip">
+        <span className="rare-chip">state: {verdictState}</span>
+        <span className="rare-chip">members: {terminals.length || "n/a"}</span>
+        <span className="rare-chip">cross-exam: {crossExams.length}</span>
+      </div>
+
+      {crossExams.length > 0 && (
+        <div className="rare-section">
+          <div className="rare-section-title">Cross-Examination</div>
+          {crossExams.slice(0, 12).map((item, idx) => (
+            <div key={`${item.challenger}-${item.target}-${idx}`} className="rare-line">
+              <b>{item.challenger}</b> → <b>{item.target}</b>: {item.point}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {terminals.length > 0 && (
+        <div className="rare-section">
+          <div className="rare-section-title">Member Terminals</div>
+          <div className="rare-terminals-grid">
+            {terminals.map((terminal) => {
+              const member = terminal.member_name || terminal.member || "member";
+              const packet = secretaryPackets[member] || null;
+              const evidenceNotes = Array.isArray(terminal.evidence_notes) ? terminal.evidence_notes : [];
+              const openQuestions = Array.isArray(terminal.open_questions) ? terminal.open_questions : [];
+              return (
+                <details key={member} className="rare-terminal-card">
+                  <summary>
+                    {member} ({terminal.pillar || "Unknown"}) · {terminal.persuasion_state || "holding"}
+                  </summary>
+                  <div className="rare-line">
+                    <b>Initial:</b> {terminal.initial_position || "N/A"}
+                  </div>
+                  <div className="rare-line">
+                    <b>Current:</b> {terminal.current_position || "N/A"}
+                  </div>
+                  <div className="rare-line">
+                    <b>Confidence:</b> {terminal.confidence ?? "N/A"}%
+                  </div>
+                  <div className="rare-line">
+                    <b>Shifted:</b> {terminal.has_shifted ? "yes" : "no"}
+                  </div>
+                  <div className="rare-line">
+                    <b>Speaking count:</b> {terminal.speaking_count ?? 0}
+                  </div>
+                  <div className="rare-line">
+                    <b>Secretary focus:</b> {terminal.secretary_focus || packet?.focus || "N/A"}
+                  </div>
+                  {evidenceNotes.length > 0 && (
+                    <div className="rare-subgroup">
+                      <b>Evidence:</b>
+                      {evidenceNotes.slice(0, 6).map((note, idx) => (
+                        <div key={`${member}-ev-${idx}`} className="rare-line">
+                          • {note}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  {openQuestions.length > 0 && (
+                    <div className="rare-subgroup">
+                      <b>Open Questions:</b>
+                      {openQuestions.slice(0, 5).map((note, idx) => (
+                        <div key={`${member}-oq-${idx}`} className="rare-line">
+                          • {note}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </details>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </details>
+  );
 }
 
 /****************************************
@@ -909,6 +1028,7 @@ export default function FAIVConsole() {
       const resp = await fetchWithRetry(
         `${API_BASE}/query/`,
         requestOptions({
+          timeoutMs: getTimeoutForMode(selectedMode),
           method: "POST",
           headers: withEmbedSessionHeader({
             "Content-Type": "application/json",
@@ -921,7 +1041,8 @@ export default function FAIVConsole() {
             mode: selectedMode,
             request_id: requestId,
           }),
-        })
+        }),
+        1
       );
       if (!resp.ok) {
         const errorBody = await resp.text();
@@ -947,6 +1068,7 @@ export default function FAIVConsole() {
             originalInput: capturedInput,
             council: data.council || {},
             mode: normalizeModeValue(data.mode || selectedMode),
+            rareChamber: data.rare_chamber || null,
           },
         }));
       }
@@ -1015,6 +1137,7 @@ export default function FAIVConsole() {
       const resp = await fetchWithRetry(
         `${API_BASE}/redeliberate/`,
         requestOptions({
+          timeoutMs: getTimeoutForMode(modeForReply),
           method: "POST",
           headers: withEmbedSessionHeader({ "Content-Type": "application/json", Accept: "application/json" }),
           body: JSON.stringify({
@@ -1028,7 +1151,8 @@ export default function FAIVConsole() {
             council_members: councilNames,
             request_id: requestId,
           }),
-        })
+        }),
+        1
       );
       if (!resp.ok) {
         const errorBody = await resp.text();
@@ -1053,6 +1177,7 @@ export default function FAIVConsole() {
             originalInput: originalInput,
             council: data.council || {},
             mode: normalizeModeValue(data.mode || modeForReply),
+            rareChamber: data.rare_chamber || null,
           },
         }));
       }
@@ -1355,10 +1480,19 @@ export default function FAIVConsole() {
                     const delibKey = `${activeSessionId}-${idx}`;
                     const delibData = deliberations[delibKey];
                     const delibText = typeof delibData === "string" ? delibData : delibData?.deliberation;
+                    const modeForMessage =
+                      typeof delibData === "string"
+                        ? normalizeModeValue(selectedMode)
+                        : normalizeModeValue(delibData?.mode || selectedMode);
+                    const rareChamber =
+                      typeof delibData === "string" ? null : delibData?.rareChamber || null;
                     const repliedTileEntries = getRepliedTileEntries(delibText, delibKey, repliedTiles);
                     return (
                       <div key={idx} className="console-line">
                         {extractFinalOutput(msg)}
+                        {modeForMessage === "deep" && rareChamber && (
+                          <RareChamberPanel chamber={rareChamber} />
+                        )}
                         {/* Replied-to tiles shown outside the drawer — always visible */}
                         {repliedTileEntries.length > 0 && (
                           <div className="replied-tiles-visible">

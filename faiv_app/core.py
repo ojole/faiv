@@ -541,9 +541,10 @@ def create_chat_completion(
 
         is_timeout = ("timed out" in err) or ("timeout" in err)
         if is_timeout:
-            min_budget = 1100 if normalized_mode == MODE_DEEP else 520
+            min_budget = 900 if normalized_mode == MODE_DEEP else 520
             retry_steps = []
-            for ratio in (0.72, 0.58, 0.45):
+            ratios = (0.72, 0.56) if normalized_mode == MODE_DEEP else (0.72, 0.58, 0.45)
+            for ratio in ratios:
                 candidate = max(min_budget, int(max_output_tokens * ratio))
                 if candidate < max_output_tokens and candidate not in retry_steps:
                     retry_steps.append(candidate)
@@ -557,7 +558,7 @@ def create_chat_completion(
                 )
                 try:
                     for index, retry_budget in enumerate(retry_steps):
-                        retry_timeout = request_timeout + (18 * (index + 1))
+                        retry_timeout = request_timeout + (12 * (index + 1))
                         try:
                             return _invoke_with_tokens(retry_budget, timeout_override=retry_timeout)
                         except Exception as retry_ex:
