@@ -490,6 +490,7 @@ def create_chat_completion(
     user: str,
     generation: dict,
     mode: str,
+    response_format: Optional[dict] = None,
 ):
     """Call Chat Completions with token-parameter compatibility across models."""
     normalized_mode = normalize_mode(mode)
@@ -508,9 +509,12 @@ def create_chat_completion(
         token_budget: int,
         use_legacy_tokens: bool = False,
         timeout_override: Optional[float] = None,
+        use_response_format: bool = True,
     ):
         request_kwargs = dict(base_request_kwargs)
         request_kwargs["timeout"] = timeout_override or request_timeout
+        if response_format and use_response_format:
+            request_kwargs["response_format"] = response_format
         if use_legacy_tokens:
             request_kwargs["max_tokens"] = token_budget
         else:
@@ -521,6 +525,15 @@ def create_chat_completion(
         return _invoke_with_tokens(max_output_tokens)
     except Exception as ex:
         err = str(ex).lower()
+        response_format_unsupported = (
+            response_format
+            and "response_format" in err
+            and ("unsupported" in err or "not supported" in err)
+        )
+        if response_format_unsupported:
+            logger.info("Retrying chat completion without response_format for model=%s", model)
+            return _invoke_with_tokens(max_output_tokens, use_response_format=False)
+
         # Some legacy models only accept `max_tokens`; retry once for compatibility.
         if supports_legacy_max_tokens and "max_completion_tokens" in err and "unsupported" in err:
             logger.info("Retrying chat completion with max_tokens for model=%s", model)
@@ -1458,6 +1471,43 @@ def _build_rare_orchestration_prompt_suffix(continuation_context: str = "") -> s
     )
 
 
+def _rare_result_is_degraded(payload: Dict[str, Any]) -> bool:
+    if not isinstance(payload, dict):
+        return True
+    transcript = payload.get("transcript")
+    member_terminals = payload.get("member_terminals")
+    consensus = _clean_line(payload.get("consensus"), 240).lower()
+    next_steps = payload.get("what_to_do_next") or []
+
+    if not isinstance(transcript, list) or not transcript:
+        return True
+    if not isinstance(member_terminals, list) or not member_terminals:
+        return True
+
+    undeclared_transcript = 0
+    for row in transcript:
+        speech = _clean_line((row or {}).get("speech"), 160).lower()
+        if speech in {"undeclared.", "undeclared", "n/a"}:
+            undeclared_transcript += 1
+
+    undeclared_terminals = 0
+    for terminal in member_terminals:
+        position = _clean_line((terminal or {}).get("current_position"), 160).lower()
+        if position in {"undeclared.", "undeclared", "n/a"}:
+            undeclared_terminals += 1
+
+    mostly_undeclared = undeclared_transcript >= max(2, int(len(transcript) * 0.75))
+    all_terminals_undeclared = undeclared_terminals >= len(member_terminals)
+    fallback_consensus = "did not reach an actionable consensus" in consensus
+    no_next_steps = not isinstance(next_steps, list) or len(next_steps) == 0
+
+    if mostly_undeclared and all_terminals_undeclared:
+        return True
+    if fallback_consensus and no_next_steps and mostly_undeclared:
+        return True
+    return False
+
+
 def run_rare_chamber_orchestration(
     *,
     session_id: str,
@@ -1529,6 +1579,7 @@ def run_rare_chamber_orchestration(
         user=safety_id or session_id,
         generation={"temperature": 0.35, "top_p": 0.85, "frequency_penalty": 0.2, "presence_penalty": 0.2},
         mode=MODE_DEEP,
+        response_format={"type": "json_object"},
     )
     phase_a_raw = phase_a_resp.choices[0].message.content.strip()
     phase_a_json = _extract_json_payload(phase_a_raw)
@@ -1662,6 +1713,7 @@ def run_rare_chamber_orchestration(
             user=safety_id or session_id,
             generation={"temperature": 0.25, "top_p": 0.8, "frequency_penalty": 0.15, "presence_penalty": 0.1},
             mode=MODE_DEEP,
+            response_format={"type": "json_object"},
         )
         phase_b_raw = phase_b_resp.choices[0].message.content.strip()
         phase_b_json = _extract_json_payload(phase_b_raw)
@@ -1741,6 +1793,7 @@ def run_rare_chamber_orchestration(
         user=safety_id or session_id,
         generation=get_model_settings(MODE_DEEP),
         mode=MODE_DEEP,
+        response_format={"type": "json_object"},
     )
     phase_c_raw = phase_c_resp.choices[0].message.content.strip()
     phase_c_json = _extract_json_payload(phase_c_raw)
@@ -1754,6 +1807,9 @@ def run_rare_chamber_orchestration(
     normalized_result["opening_transcript"] = opening_transcript
     normalized_result["mode"] = MODE_DEEP
     normalized_result["pillar"] = pillar
+
+    if _rare_result_is_degraded(normalized_result):
+        raise RuntimeError("Rare chamber produced degraded scaffold output.")
 
     deliberation_text = _render_rare_deliberation(normalized_result["transcript"])
     final_text = _format_rare_final_text(normalized_result, pillar)
