@@ -467,6 +467,36 @@ def get_model_settings(mode: str) -> dict:
     }
 
 
+def create_chat_completion(
+    *,
+    model: str,
+    messages: list,
+    max_output_tokens: int,
+    user: str,
+    generation: dict,
+):
+    """Call Chat Completions with token-parameter compatibility across models."""
+    request_kwargs = {
+        "model": model,
+        "messages": messages,
+        "max_completion_tokens": max_output_tokens,
+        "user": user,
+        **generation,
+    }
+    try:
+        return client.chat.completions.create(**request_kwargs)
+    except Exception as ex:
+        # Some legacy models only accept `max_tokens`; retry once for compatibility.
+        err = str(ex).lower()
+        if "max_completion_tokens" in err and "unsupported" in err:
+            fallback_kwargs = dict(request_kwargs)
+            fallback_kwargs.pop("max_completion_tokens", None)
+            fallback_kwargs["max_tokens"] = max_output_tokens
+            logger.info("Retrying chat completion with max_tokens for model=%s", model)
+            return client.chat.completions.create(**fallback_kwargs)
+        raise
+
+
 def _flatten_text(value) -> str:
     if isinstance(value, list):
         return ", ".join(str(item) for item in value)
@@ -1288,12 +1318,12 @@ def query_openai_faiv(
         ]
 
         generation = get_model_settings(normalized_mode)
-        resp = client.chat.completions.create(
+        resp = create_chat_completion(
             model=model,
             messages=messages_for_api,
-            max_tokens=get_max_output_tokens(normalized_mode),
+            max_output_tokens=get_max_output_tokens(normalized_mode),
             user=safety_id or session_id,
-            **generation,
+            generation=generation,
         )
         raw = resp.choices[0].message.content.strip()
         deliberation, final_text = split_response_sections(raw)
@@ -1940,12 +1970,12 @@ def query_openai_redeliberate(
         ]
 
         generation = get_model_settings(normalized_mode)
-        resp = client.chat.completions.create(
+        resp = create_chat_completion(
             model=model,
             messages=messages_for_api,
-            max_tokens=get_max_output_tokens(normalized_mode),
+            max_output_tokens=get_max_output_tokens(normalized_mode),
             user=safety_id or session_id,
-            **generation,
+            generation=generation,
         )
         raw = resp.choices[0].message.content.strip()
         deliberation, final_text = split_response_sections(raw)
