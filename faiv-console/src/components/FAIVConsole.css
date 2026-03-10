@@ -269,27 +269,43 @@ body {
 .left-window-body,
 .right-console-body,
 .deliberation-pre,
-.deliberation-tiles-container {
+.deliberation-tiles-container,
+.rare-terminals-grid,
+.rare-events-list,
+.rare-transcript-list,
+.rare-secretary-grid {
   scrollbar-width: thin;
   scrollbar-color: #00ff00 black;
 }
 .left-window-body::-webkit-scrollbar,
 .right-console-body::-webkit-scrollbar,
 .deliberation-pre::-webkit-scrollbar,
-.deliberation-tiles-container::-webkit-scrollbar {
+.deliberation-tiles-container::-webkit-scrollbar,
+.rare-terminals-grid::-webkit-scrollbar,
+.rare-events-list::-webkit-scrollbar,
+.rare-transcript-list::-webkit-scrollbar,
+.rare-secretary-grid::-webkit-scrollbar {
   width: 10px;
   height: 10px;
 }
 .left-window-body::-webkit-scrollbar-track,
 .right-console-body::-webkit-scrollbar-track,
 .deliberation-pre::-webkit-scrollbar-track,
-.deliberation-tiles-container::-webkit-scrollbar-track {
+.deliberation-tiles-container::-webkit-scrollbar-track,
+.rare-terminals-grid::-webkit-scrollbar-track,
+.rare-events-list::-webkit-scrollbar-track,
+.rare-transcript-list::-webkit-scrollbar-track,
+.rare-secretary-grid::-webkit-scrollbar-track {
   background: black;
 }
 .left-window-body::-webkit-scrollbar-thumb,
 .right-console-body::-webkit-scrollbar-thumb,
 .deliberation-pre::-webkit-scrollbar-thumb,
-.deliberation-tiles-container::-webkit-scrollbar-thumb {
+.deliberation-tiles-container::-webkit-scrollbar-thumb,
+.rare-terminals-grid::-webkit-scrollbar-thumb,
+.rare-events-list::-webkit-scrollbar-thumb,
+.rare-transcript-list::-webkit-scrollbar-thumb,
+.rare-secretary-grid::-webkit-scrollbar-thumb {
   background: #00ff00;
   box-shadow: inset -2px -2px 0 #003300, inset 2px 2px 0 #000000;
 }
@@ -550,6 +566,127 @@ body {
 .deliberation-details {
   margin-top: 8px;
   font-size: 12px;
+}
+
+.rare-chamber-details {
+  margin-top: 8px;
+  border: 1px solid #003300;
+  background: #050505;
+  padding: 4px 6px;
+}
+
+.rare-chamber-summary {
+  cursor: pointer;
+  color: #00ff00;
+  font-family: "Courier New", monospace;
+  font-size: 12px;
+  list-style: none;
+}
+
+.rare-chamber-summary::-webkit-details-marker {
+  display: none;
+}
+
+.rare-chamber-summary::before {
+  content: "\25B6  ";
+}
+
+.rare-chamber-details[open] > .rare-chamber-summary::before {
+  content: "\25BC  ";
+}
+
+.rare-verdict-strip {
+  margin-top: 6px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.rare-chip {
+  border: 1px solid #005500;
+  background: #001700;
+  color: #00d966;
+  font-size: 11px;
+  padding: 2px 6px;
+  font-family: "Courier New", monospace;
+}
+
+.rare-section {
+  margin-top: 8px;
+  border-top: 1px dotted #004400;
+  padding-top: 6px;
+}
+
+.rare-section-title {
+  color: #00ff66;
+  font-weight: bold;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 4px;
+}
+
+.rare-line {
+  font-size: 11px;
+  line-height: 1.4;
+  color: #00cc66;
+  margin: 2px 0;
+}
+
+.rare-terminals-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 260px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.rare-terminal-card {
+  border: 1px solid #004600;
+  background: #020d02;
+  padding: 4px 6px;
+}
+
+.rare-terminal-card > summary {
+  cursor: pointer;
+  color: #00ff66;
+  font-size: 11px;
+  font-weight: bold;
+  list-style: none;
+}
+
+.rare-terminal-card > summary::-webkit-details-marker {
+  display: none;
+}
+
+.rare-terminal-card > summary::before {
+  content: "\25B6  ";
+}
+
+.rare-terminal-card[open] > summary::before {
+  content: "\25BC  ";
+}
+
+.rare-subgroup {
+  margin-top: 4px;
+}
+
+.rare-transcript-list,
+.rare-events-list,
+.rare-secretary-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 260px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.rare-event-card {
+  border: 1px solid #004600;
+  background: #020d02;
+  padding: 4px 6px;
 }
 
 /* Custom arrow glyphs for deliberation collapse */

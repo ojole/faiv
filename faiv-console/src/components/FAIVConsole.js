@@ -275,6 +275,19 @@ function extractFinalOutput(response) {
           );
         }
 
+        // CASE C6: "Stop Reason:"
+        if (line.startsWith("Stop Reason:")) {
+          const val = cleanStr(line.replace(/^Stop Reason:/i, ""));
+          return (
+            <div key={idx} className="console-line">
+              <b>
+                <u>Stop Reason:</u>
+              </b>{" "}
+              {val}
+            </div>
+          );
+        }
+
         // CASE D: "Differing Opinion -"
         if (line.startsWith("Differing Opinion -")) {
           const val = cleanStr(line.replace(/^Differing Opinion -/i, ""));
@@ -477,91 +490,282 @@ function prettyVerdictState(rawValue) {
   return value.replace(/_/g, " ");
 }
 
-function RareChamberPanel({ chamber }) {
-  if (!chamber || typeof chamber !== "object") return null;
-  const verdictState = prettyVerdictState(chamber.verdict_state);
-  const terminals = Array.isArray(chamber.member_terminals) ? chamber.member_terminals : [];
-  const crossExams = Array.isArray(chamber.cross_examinations) ? chamber.cross_examinations : [];
-  const secretaryPackets =
-    chamber.secretary_packets && typeof chamber.secretary_packets === "object"
-      ? chamber.secretary_packets
+function prettyStopReason(rawValue) {
+  const value = String(rawValue || "").trim().toLowerCase();
+  if (!value) return "provisional verdict";
+  return value.replace(/_/g, " ");
+}
+
+function eventTypeLabel(rawValue) {
+  const value = String(rawValue || "").trim().toLowerCase();
+  if (!value) return "event";
+  return value.replace(/_/g, " ");
+}
+
+function normalizeRareDeliberationPayload(payload) {
+  if (!payload || typeof payload !== "object") return null;
+
+  // New schema: already structured under rare_deliberation object
+  if (payload.verdict && Array.isArray(payload.members)) {
+    return payload;
+  }
+
+  // Legacy schema fallback: map rare_chamber -> rare_deliberation-like shape
+  const verdict = {
+    consensus: payload.consensus || "No consensus recorded.",
+    confidence: payload.confidence ?? "N/A",
+    verdict_state: payload.verdict_state || "provisional",
+    core_insight: payload.core_insight || "N/A",
+    what_to_do_next: Array.isArray(payload.what_to_do_next) ? payload.what_to_do_next : [],
+    unresolved_doubts: Array.isArray(payload.unresolved_doubts) ? payload.unresolved_doubts : [],
+    differing_opinion: payload.dissent || null,
+    stop_reason: payload.stop_reason || "provisional_verdict",
+  };
+
+  const members = Array.isArray(payload.member_terminals)
+    ? payload.member_terminals.map((m) => ({
+        name: m.member_name || m.member || "member",
+        pillar: m.pillar || "Unknown",
+        initial_position: m.initial_position || "N/A",
+        current_position: m.current_position || "N/A",
+        confidence: m.confidence ?? "N/A",
+        has_shifted: Boolean(m.has_shifted),
+        shift_reason: m.shift_reason || "No material shift recorded.",
+        allies: Array.isArray(m.allies) ? m.allies : [],
+        frictions: Array.isArray(m.frictions) ? m.frictions : [],
+        speaking_count: m.speaking_count ?? 0,
+        secretary_invocations: m.secretary_invocations ?? (m.secretary_invoked ? 1 : 0),
+        secretary_focus: m.secretary_focus || "N/A",
+        unresolved_objection: m.unresolved_objection || "N/A",
+        persuasion_state: m.persuasion_state || "holding",
+        evidence_notes: Array.isArray(m.evidence_notes) ? m.evidence_notes : [],
+        open_questions: Array.isArray(m.open_questions) ? m.open_questions : [],
+      }))
+    : [];
+
+  const transcript = Array.isArray(payload.transcript)
+    ? payload.transcript.map((row, idx) => ({
+        turn_index: idx + 1,
+        speaker: row.speaker || "Member",
+        pillar: row.pillar || "Unknown",
+        text: row.speech || "N/A",
+        target: row.target || null,
+        used_secretary: Boolean(row.used_secretary),
+        stance_shift: row.stance_shift || "no_change",
+      }))
+    : [];
+
+  const secretary_packets =
+    payload.secretary_packets && typeof payload.secretary_packets === "object"
+      ? payload.secretary_packets
       : {};
+  const secretary_activity = Object.entries(secretary_packets).map(([member, packet]) => ({
+    member,
+    focus: packet.focus || "N/A",
+    supporting_evidence: Array.isArray(packet.supporting_evidence) ? packet.supporting_evidence : [],
+    counter_evidence: Array.isArray(packet.counter_evidence) ? packet.counter_evidence : [],
+    precedents: Array.isArray(packet.precedents) ? packet.precedents : [],
+    risks: Array.isArray(packet.risks) ? packet.risks : [],
+    uncertainty_flags: Array.isArray(packet.uncertainty_flags) ? packet.uncertainty_flags : [],
+    open_questions: Array.isArray(packet.open_questions) ? packet.open_questions : [],
+  }));
+
+  const events = Array.isArray(payload.events)
+    ? payload.events
+    : transcript.map((turn) => ({
+        event_id: `evt_${String(turn.turn_index).padStart(3, "0")}`,
+        type: turn.target ? "challenge" : turn.used_secretary ? "evidence_argument" : "support",
+        speaker: turn.speaker,
+        target: turn.target,
+        summary: `${turn.speaker} delivered a chamber statement.`,
+        detail: turn.text,
+        turn_index: turn.turn_index,
+      }));
+
+  return {
+    verdict,
+    members,
+    events,
+    transcript,
+    secretary_activity,
+    cross_examinations: Array.isArray(payload.cross_examinations) ? payload.cross_examinations : [],
+  };
+}
+
+function RareChamberPanel({ chamber }) {
+  const normalized = normalizeRareDeliberationPayload(chamber);
+  if (!normalized) return null;
+
+  const verdict = normalized.verdict || {};
+  const members = Array.isArray(normalized.members) ? normalized.members : [];
+  const events = Array.isArray(normalized.events) ? normalized.events : [];
+  const transcript = Array.isArray(normalized.transcript) ? normalized.transcript : [];
+  const secretaryActivity = Array.isArray(normalized.secretary_activity) ? normalized.secretary_activity : [];
+  const crossExams = Array.isArray(normalized.cross_examinations) ? normalized.cross_examinations : [];
+  const dissent = verdict.differing_opinion && typeof verdict.differing_opinion === "object"
+    ? verdict.differing_opinion
+    : null;
 
   return (
     <details className="rare-chamber-details">
-      <summary className="rare-chamber-summary">Rare Chamber</summary>
+      <summary className="rare-chamber-summary">Rare Chamber Record</summary>
+
       <div className="rare-verdict-strip">
-        <span className="rare-chip">state: {verdictState}</span>
-        <span className="rare-chip">members: {terminals.length || "n/a"}</span>
-        <span className="rare-chip">cross-exam: {crossExams.length}</span>
+        <span className="rare-chip">state: {prettyVerdictState(verdict.verdict_state)}</span>
+        <span className="rare-chip">stop: {prettyStopReason(verdict.stop_reason)}</span>
+        <span className="rare-chip">members: {members.length || "n/a"}</span>
+        <span className="rare-chip">events: {events.length || 0}</span>
       </div>
 
-      {crossExams.length > 0 && (
-        <div className="rare-section">
-          <div className="rare-section-title">Cross-Examination</div>
-          {crossExams.slice(0, 12).map((item, idx) => (
-            <div key={`${item.challenger}-${item.target}-${idx}`} className="rare-line">
-              <b>{item.challenger}</b> → <b>{item.target}</b>: {item.point}
+      <div className="rare-section">
+        <div className="rare-section-title">Council Verdict</div>
+        <div className="rare-line"><b>Consensus:</b> {verdict.consensus || "N/A"}</div>
+        <div className="rare-line"><b>Confidence:</b> {verdict.confidence ?? "N/A"}%</div>
+        <div className="rare-line"><b>Core Insight:</b> {verdict.core_insight || "N/A"}</div>
+        <div className="rare-line"><b>Stop Reason:</b> {prettyStopReason(verdict.stop_reason)}</div>
+        {Array.isArray(verdict.what_to_do_next) && verdict.what_to_do_next.length > 0 && (
+          <div className="rare-subgroup">
+            <b>What To Do Next:</b>
+            {verdict.what_to_do_next.slice(0, 6).map((item, idx) => (
+              <div className="rare-line" key={`next-${idx}`}>• {item}</div>
+            ))}
+          </div>
+        )}
+        {Array.isArray(verdict.unresolved_doubts) && verdict.unresolved_doubts.length > 0 && (
+          <div className="rare-subgroup">
+            <b>Unresolved Doubts:</b>
+            {verdict.unresolved_doubts.slice(0, 6).map((item, idx) => (
+              <div className="rare-line" key={`doubt-${idx}`}>• {item}</div>
+            ))}
+          </div>
+        )}
+        {dissent && (
+          <div className="rare-subgroup">
+            <b>Differing Opinion:</b>
+            <div className="rare-line">
+              {dissent.member || "Member"} ({dissent.confidence ?? "N/A"}%): {dissent.position || "N/A"}
             </div>
-          ))}
+            <div className="rare-line"><b>Reason:</b> {dissent.reason || "N/A"}</div>
+          </div>
+        )}
+      </div>
+
+      {transcript.length > 0 && (
+        <div className="rare-section">
+          <div className="rare-section-title">Chamber Transcript</div>
+          <div className="rare-transcript-list">
+            {transcript.slice(0, 80).map((turn) => (
+              <div className="rare-line" key={`tx-${turn.turn_index}-${turn.speaker}`}>
+                <b>t{turn.turn_index} · {turn.speaker}</b> ({turn.pillar || "Unknown"}): {turn.text}
+              </div>
+            ))}
+          </div>
         </div>
       )}
 
-      {terminals.length > 0 && (
+      {events.length > 0 && (
+        <div className="rare-section">
+          <div className="rare-section-title">Chamber Events / Deliberation Credits</div>
+          <div className="rare-events-list">
+            {events.slice(0, 120).map((event) => (
+              <div className="rare-event-card" key={event.event_id || `${event.type}-${event.turn_index}`}>
+                <div className="rare-line">
+                  <b>{eventTypeLabel(event.type)}</b>
+                  {event.turn_index ? ` · turn ${event.turn_index}` : ""}
+                </div>
+                <div className="rare-line">
+                  {(event.speaker || "Chamber")}
+                  {event.target ? ` → ${event.target}` : ""}
+                </div>
+                <div className="rare-line">{event.summary || "N/A"}</div>
+                {event.detail && <div className="rare-line">{event.detail}</div>}
+                {Array.isArray(event.evidence) && event.evidence.length > 0 && (
+                  <div className="rare-subgroup">
+                    <b>Evidence:</b>
+                    {event.evidence.slice(0, 5).map((item, idx) => (
+                      <div className="rare-line" key={`${event.event_id}-ev-${idx}`}>• {item}</div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {members.length > 0 && (
         <div className="rare-section">
           <div className="rare-section-title">Member Terminals</div>
           <div className="rare-terminals-grid">
-            {terminals.map((terminal) => {
-              const member = terminal.member_name || terminal.member || "member";
-              const packet = secretaryPackets[member] || null;
-              const evidenceNotes = Array.isArray(terminal.evidence_notes) ? terminal.evidence_notes : [];
-              const openQuestions = Array.isArray(terminal.open_questions) ? terminal.open_questions : [];
-              return (
-                <details key={member} className="rare-terminal-card">
-                  <summary>
-                    {member} ({terminal.pillar || "Unknown"}) · {terminal.persuasion_state || "holding"}
-                  </summary>
-                  <div className="rare-line">
-                    <b>Initial:</b> {terminal.initial_position || "N/A"}
+            {members.map((member) => (
+              <details key={member.name} className="rare-terminal-card">
+                <summary>
+                  {member.name} ({member.pillar || "Unknown"}) · {member.persuasion_state || "holding"}
+                </summary>
+                <div className="rare-line"><b>Initial:</b> {member.initial_position || "N/A"}</div>
+                <div className="rare-line"><b>Current:</b> {member.current_position || "N/A"}</div>
+                <div className="rare-line"><b>Confidence:</b> {member.confidence ?? "N/A"}%</div>
+                <div className="rare-line">
+                  <b>Changed Mind:</b> {member.has_shifted ? "yes" : "no"}
+                </div>
+                <div className="rare-line"><b>Shift Reason:</b> {member.shift_reason || "No material shift recorded."}</div>
+                <div className="rare-line"><b>Speaking Count:</b> {member.speaking_count ?? 0}</div>
+                <div className="rare-line"><b>Secretary Invocations:</b> {member.secretary_invocations ?? 0}</div>
+                <div className="rare-line"><b>Secretary Focus:</b> {member.secretary_focus || "N/A"}</div>
+                <div className="rare-line"><b>Unresolved Objection:</b> {member.unresolved_objection || "N/A"}</div>
+                {Array.isArray(member.allies) && member.allies.length > 0 && (
+                  <div className="rare-line"><b>Allies:</b> {member.allies.join(", ")}</div>
+                )}
+                {Array.isArray(member.frictions) && member.frictions.length > 0 && (
+                  <div className="rare-line"><b>Frictions:</b> {member.frictions.join(", ")}</div>
+                )}
+                {Array.isArray(member.evidence_notes) && member.evidence_notes.length > 0 && (
+                  <div className="rare-subgroup">
+                    <b>Evidence Notes:</b>
+                    {member.evidence_notes.slice(0, 6).map((note, idx) => (
+                      <div className="rare-line" key={`${member.name}-en-${idx}`}>• {note}</div>
+                    ))}
                   </div>
-                  <div className="rare-line">
-                    <b>Current:</b> {terminal.current_position || "N/A"}
+                )}
+              </details>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {(secretaryActivity.length > 0 || crossExams.length > 0) && (
+        <div className="rare-section">
+          <div className="rare-section-title">Secretary Activity</div>
+          <div className="rare-secretary-grid">
+            {secretaryActivity.map((item, idx) => (
+              <div className="rare-event-card" key={`sec-${item.member}-${idx}`}>
+                <div className="rare-line"><b>{item.member}</b></div>
+                <div className="rare-line"><b>Focus:</b> {item.focus || "N/A"}</div>
+                {Array.isArray(item.supporting_evidence) && item.supporting_evidence.length > 0 && (
+                  <div className="rare-subgroup">
+                    <b>Supporting:</b>
+                    {item.supporting_evidence.slice(0, 4).map((evidence, evidenceIdx) => (
+                      <div className="rare-line" key={`sup-${idx}-${evidenceIdx}`}>• {evidence}</div>
+                    ))}
                   </div>
-                  <div className="rare-line">
-                    <b>Confidence:</b> {terminal.confidence ?? "N/A"}%
+                )}
+                {Array.isArray(item.counter_evidence) && item.counter_evidence.length > 0 && (
+                  <div className="rare-subgroup">
+                    <b>Counter:</b>
+                    {item.counter_evidence.slice(0, 4).map((evidence, evidenceIdx) => (
+                      <div className="rare-line" key={`ctr-${idx}-${evidenceIdx}`}>• {evidence}</div>
+                    ))}
                   </div>
-                  <div className="rare-line">
-                    <b>Shifted:</b> {terminal.has_shifted ? "yes" : "no"}
-                  </div>
-                  <div className="rare-line">
-                    <b>Speaking count:</b> {terminal.speaking_count ?? 0}
-                  </div>
-                  <div className="rare-line">
-                    <b>Secretary focus:</b> {terminal.secretary_focus || packet?.focus || "N/A"}
-                  </div>
-                  {evidenceNotes.length > 0 && (
-                    <div className="rare-subgroup">
-                      <b>Evidence:</b>
-                      {evidenceNotes.slice(0, 6).map((note, idx) => (
-                        <div key={`${member}-ev-${idx}`} className="rare-line">
-                          • {note}
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                  {openQuestions.length > 0 && (
-                    <div className="rare-subgroup">
-                      <b>Open Questions:</b>
-                      {openQuestions.slice(0, 5).map((note, idx) => (
-                        <div key={`${member}-oq-${idx}`} className="rare-line">
-                          • {note}
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </details>
-              );
-            })}
+                )}
+              </div>
+            ))}
+            {crossExams.slice(0, 10).map((item, idx) => (
+              <div className="rare-event-card" key={`cx-${item.challenger}-${item.target}-${idx}`}>
+                <div className="rare-line"><b>Cross-Examination</b></div>
+                <div className="rare-line">{item.challenger} → {item.target}</div>
+                <div className="rare-line">{item.point}</div>
+              </div>
+            ))}
           </div>
         </div>
       )}
@@ -1063,15 +1267,16 @@ export default function FAIVConsole() {
         const msgIdx = updated.length - 1;
         setDeliberations((prev) => ({
           ...prev,
-          [`${activeSessionId}-${msgIdx}`]: {
-            deliberation: data.deliberation,
-            originalInput: capturedInput,
-            council: data.council || {},
-            mode: normalizeModeValue(data.mode || selectedMode),
-            rareChamber: data.rare_chamber || null,
-          },
-        }));
-      }
+              [`${activeSessionId}-${msgIdx}`]: {
+                deliberation: data.deliberation,
+                originalInput: capturedInput,
+                council: data.council || {},
+                mode: normalizeModeValue(data.mode || selectedMode),
+                rareChamber: data.rare_chamber || null,
+                rareDeliberation: data.rare_deliberation || null,
+              },
+            }));
+          }
 
       // Refresh health status on success
       setApiStatus("ok");
@@ -1172,15 +1377,16 @@ export default function FAIVConsole() {
         const newMsgIdx = updated.length - 1;
         setDeliberations((prev) => ({
           ...prev,
-          [`${activeSessionId}-${newMsgIdx}`]: {
-            deliberation: data.deliberation,
-            originalInput: originalInput,
-            council: data.council || {},
-            mode: normalizeModeValue(data.mode || modeForReply),
-            rareChamber: data.rare_chamber || null,
-          },
-        }));
-      }
+              [`${activeSessionId}-${newMsgIdx}`]: {
+                deliberation: data.deliberation,
+                originalInput: originalInput,
+                council: data.council || {},
+                mode: normalizeModeValue(data.mode || modeForReply),
+                rareChamber: data.rare_chamber || null,
+                rareDeliberation: data.rare_deliberation || null,
+              },
+            }));
+          }
       setApiStatus("ok");
     } catch (err) {
       const isNetworkError = isNetworkFetchError(err);
@@ -1484,14 +1690,16 @@ export default function FAIVConsole() {
                       typeof delibData === "string"
                         ? normalizeModeValue(selectedMode)
                         : normalizeModeValue(delibData?.mode || selectedMode);
-                    const rareChamber =
-                      typeof delibData === "string" ? null : delibData?.rareChamber || null;
+                    const rarePayload =
+                      typeof delibData === "string"
+                        ? null
+                        : delibData?.rareDeliberation || delibData?.rareChamber || null;
                     const repliedTileEntries = getRepliedTileEntries(delibText, delibKey, repliedTiles);
                     return (
                       <div key={idx} className="console-line">
                         {extractFinalOutput(msg)}
-                        {modeForMessage === "deep" && rareChamber && (
-                          <RareChamberPanel chamber={rareChamber} />
+                        {modeForMessage === "deep" && rarePayload && (
+                          <RareChamberPanel chamber={rarePayload} />
                         )}
                         {/* Replied-to tiles shown outside the drawer — always visible */}
                         {repliedTileEntries.length > 0 && (
