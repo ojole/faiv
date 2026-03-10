@@ -14,7 +14,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Any, Dict, List, Optional, Tuple
 from fastapi.middleware.cors import CORSMiddleware
 
 from faiv_app.identity_codex import FAIV_IDENTITY_CODEX
@@ -74,10 +74,10 @@ EMBED_SESSION_HEADER = "x-faiv-embed-session"
 EMBED_SESSION_QUERY_PARAM = "embed_session"
 OPENAI_DEFAULT_MODEL = os.getenv("FAIV_OPENAI_MODEL", "gpt-5.4")
 OPENAI_MAX_OUTPUT_TOKENS = int(os.getenv("FAIV_OPENAI_MAX_OUTPUT_TOKENS", "900"))
-OPENAI_MAX_OUTPUT_TOKENS_VERDICT = int(os.getenv("FAIV_OPENAI_MAX_OUTPUT_TOKENS_VERDICT", "1200"))
-OPENAI_MAX_OUTPUT_TOKENS_DEEP = int(os.getenv("FAIV_OPENAI_MAX_OUTPUT_TOKENS_DEEP", "3500"))
-OPENAI_MAX_OUTPUT_TOKENS_VERDICT_CAP = int(os.getenv("FAIV_OPENAI_MAX_OUTPUT_TOKENS_VERDICT_CAP", "1200"))
-OPENAI_MAX_OUTPUT_TOKENS_DEEP_CAP = int(os.getenv("FAIV_OPENAI_MAX_OUTPUT_TOKENS_DEEP_CAP", "2200"))
+OPENAI_MAX_OUTPUT_TOKENS_VERDICT = int(os.getenv("FAIV_OPENAI_MAX_OUTPUT_TOKENS_VERDICT", "900"))
+OPENAI_MAX_OUTPUT_TOKENS_DEEP = int(os.getenv("FAIV_OPENAI_MAX_OUTPUT_TOKENS_DEEP", "1900"))
+OPENAI_MAX_OUTPUT_TOKENS_VERDICT_CAP = int(os.getenv("FAIV_OPENAI_MAX_OUTPUT_TOKENS_VERDICT_CAP", "1000"))
+OPENAI_MAX_OUTPUT_TOKENS_DEEP_CAP = int(os.getenv("FAIV_OPENAI_MAX_OUTPUT_TOKENS_DEEP_CAP", "1800"))
 OPENAI_VERDICT_TEMPERATURE = float(os.getenv("FAIV_OPENAI_TEMPERATURE_VERDICT", "0.2"))
 OPENAI_DEEP_TEMPERATURE = float(os.getenv("FAIV_OPENAI_TEMPERATURE_DEEP", "0.42"))
 OPENAI_VERDICT_TOP_P = float(os.getenv("FAIV_OPENAI_TOP_P_VERDICT", "0.8"))
@@ -87,8 +87,8 @@ OPENAI_DEEP_FREQ_PENALTY = float(os.getenv("FAIV_OPENAI_FREQ_PENALTY_DEEP", "0.2
 OPENAI_VERDICT_PRES_PENALTY = float(os.getenv("FAIV_OPENAI_PRES_PENALTY_VERDICT", "0.1"))
 OPENAI_DEEP_PRES_PENALTY = float(os.getenv("FAIV_OPENAI_PRES_PENALTY_DEEP", "0.3"))
 OPENAI_CLIENT_TIMEOUT_SECONDS = float(os.getenv("FAIV_OPENAI_TIMEOUT_SECONDS", "35"))
-OPENAI_TIMEOUT_SECONDS_VERDICT = float(os.getenv("FAIV_OPENAI_TIMEOUT_SECONDS_VERDICT", "70"))
-OPENAI_TIMEOUT_SECONDS_DEEP = float(os.getenv("FAIV_OPENAI_TIMEOUT_SECONDS_DEEP", "110"))
+OPENAI_TIMEOUT_SECONDS_VERDICT = float(os.getenv("FAIV_OPENAI_TIMEOUT_SECONDS_VERDICT", "95"))
+OPENAI_TIMEOUT_SECONDS_DEEP = float(os.getenv("FAIV_OPENAI_TIMEOUT_SECONDS_DEEP", "180"))
 OPENAI_CLIENT_MAX_RETRIES = int(os.getenv("FAIV_OPENAI_MAX_RETRIES", "1"))
 IDEMPOTENCY_TTL_SECONDS = int(os.getenv("FAIV_IDEMPOTENCY_TTL_SECONDS", "180"))
 
@@ -494,17 +494,23 @@ def create_chat_completion(
     """Call Chat Completions with token-parameter compatibility across models."""
     normalized_mode = normalize_mode(mode)
     request_timeout = get_request_timeout(normalized_mode)
+    model_lower = (model or "").strip().lower()
+    supports_legacy_max_tokens = not model_lower.startswith("gpt-5")
 
     base_request_kwargs = {
         "model": model,
         "messages": messages,
         "user": user,
-        "timeout": request_timeout,
         **generation,
     }
 
-    def _invoke_with_tokens(token_budget: int, use_legacy_tokens: bool = False):
+    def _invoke_with_tokens(
+        token_budget: int,
+        use_legacy_tokens: bool = False,
+        timeout_override: Optional[float] = None,
+    ):
         request_kwargs = dict(base_request_kwargs)
+        request_kwargs["timeout"] = timeout_override or request_timeout
         if use_legacy_tokens:
             request_kwargs["max_tokens"] = token_budget
         else:
@@ -516,30 +522,44 @@ def create_chat_completion(
     except Exception as ex:
         err = str(ex).lower()
         # Some legacy models only accept `max_tokens`; retry once for compatibility.
-        if "max_completion_tokens" in err and "unsupported" in err:
+        if supports_legacy_max_tokens and "max_completion_tokens" in err and "unsupported" in err:
             logger.info("Retrying chat completion with max_tokens for model=%s", model)
             return _invoke_with_tokens(max_output_tokens, use_legacy_tokens=True)
 
         is_timeout = ("timed out" in err) or ("timeout" in err)
         if is_timeout:
-            retry_budget = max(700, int(max_output_tokens * 0.65))
-            if normalized_mode == MODE_DEEP:
-                retry_budget = max(1200, retry_budget)
-            if retry_budget < max_output_tokens:
+            min_budget = 1100 if normalized_mode == MODE_DEEP else 520
+            retry_steps = []
+            for ratio in (0.72, 0.58, 0.45):
+                candidate = max(min_budget, int(max_output_tokens * ratio))
+                if candidate < max_output_tokens and candidate not in retry_steps:
+                    retry_steps.append(candidate)
+
+            if retry_steps:
                 logger.warning(
-                    "OpenAI request timed out for model=%s mode=%s. Retrying with lower token budget (%s -> %s).",
+                    "OpenAI request timed out for model=%s mode=%s. Retrying with lower budgets=%s.",
                     model,
                     normalized_mode,
-                    max_output_tokens,
-                    retry_budget,
+                    retry_steps,
                 )
                 try:
-                    return _invoke_with_tokens(retry_budget)
-                except Exception as retry_ex:
-                    retry_err = str(retry_ex).lower()
-                    if "max_completion_tokens" in retry_err and "unsupported" in retry_err:
-                        return _invoke_with_tokens(retry_budget, use_legacy_tokens=True)
-                    raise retry_ex
+                    for index, retry_budget in enumerate(retry_steps):
+                        retry_timeout = request_timeout + (18 * (index + 1))
+                        try:
+                            return _invoke_with_tokens(retry_budget, timeout_override=retry_timeout)
+                        except Exception as retry_ex:
+                            retry_err = str(retry_ex).lower()
+                            if supports_legacy_max_tokens and "max_completion_tokens" in retry_err and "unsupported" in retry_err:
+                                return _invoke_with_tokens(
+                                    retry_budget,
+                                    use_legacy_tokens=True,
+                                    timeout_override=retry_timeout,
+                                )
+                            if ("timed out" in retry_err) or ("timeout" in retry_err):
+                                continue
+                            raise retry_ex
+                except Exception:
+                    raise
         raise
 
 
@@ -679,6 +699,9 @@ def summarize_past_messages(messages: list) -> str:
         members_str = ", ".join(members[:5]) if isinstance(members, list) else "N/A"
         tension = _clean_line(msg.get("key_tension") or "N/A", 160)
         unresolved = _clean_line(msg.get("unresolved_question") or "N/A", 140)
+        rare_payload = msg.get("rare_chamber") if isinstance(msg.get("rare_chamber"), dict) else None
+        verdict_state = _clean_line((rare_payload or {}).get("verdict_state"), 40) if rare_payload else "N/A"
+        rare_core = _clean_line((rare_payload or {}).get("core_insight"), 120) if rare_payload else "N/A"
 
         record = (
             f"[{mode_label}/{pillar}] Consensus: {consensus} | "
@@ -687,6 +710,10 @@ def summarize_past_messages(messages: list) -> str:
         )
         if unresolved != "N/A":
             record += f" | Unresolved: {unresolved}"
+        if verdict_state != "N/A":
+            record += f" | VerdictState: {verdict_state}"
+        if rare_core != "N/A":
+            record += f" | Core: {rare_core}"
         summarized.append(record)
 
     if not summarized:
@@ -1060,6 +1087,687 @@ Respond in EXACTLY two sections: [DELIBERATION] and [FINAL].
 """
 
 
+RARE_ALLOWED_VERDICT_STATES = {
+    "unanimous",
+    "majority_with_dissent",
+    "provisional",
+    "stalled_but_leaning",
+    "unresolved",
+}
+
+
+def _strip_code_fences(text: str) -> str:
+    cleaned = text.strip()
+    cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s*```$", "", cleaned)
+    return cleaned.strip()
+
+
+def _extract_json_payload(raw_text: str) -> Dict[str, Any]:
+    if not raw_text or not isinstance(raw_text, str):
+        return {}
+    cleaned = _strip_code_fences(raw_text)
+    candidates = [cleaned]
+    brace_start = cleaned.find("{")
+    brace_end = cleaned.rfind("}")
+    if brace_start != -1 and brace_end != -1 and brace_end > brace_start:
+        candidates.append(cleaned[brace_start: brace_end + 1])
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            continue
+    return {}
+
+
+def _coerce_member_name(raw_name: Any, selected_members: Dict[str, dict]) -> str:
+    if not raw_name:
+        return ""
+    candidate = str(raw_name).strip()
+    if candidate in selected_members:
+        return candidate
+    lowered = candidate.lower()
+    for name in selected_members:
+        if name.lower() == lowered:
+            return name
+    return ""
+
+
+def _coerce_str_list(value: Any, *, max_items: int = 6, max_len: int = 180) -> List[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        items = [value]
+    elif isinstance(value, list):
+        items = value
+    else:
+        items = [str(value)]
+
+    out: List[str] = []
+    for item in items:
+        cleaned = _clean_line(item, max_len)
+        if cleaned != "N/A":
+            out.append(cleaned)
+        if len(out) >= max_items:
+            break
+    return out
+
+
+def _coerce_int(value: Any, default: int, *, min_value: int = 1, max_value: int = 100) -> int:
+    try:
+        number = int(float(str(value).strip()))
+    except Exception:
+        return default
+    return max(min_value, min(max_value, number))
+
+
+def _default_secretary_focus(member_name: str, pillar: str) -> str:
+    defaults = {
+        "Kyre": "Surface contradictions, overclaim risk, and definitional ambiguity.",
+        "Iom": "Prioritize leverage, operational utility, and strategic differentiation.",
+        "Jexa": "Analyze governance structure, power concentration, and control implications.",
+        "Dorin": "Check procedural rigor, reproducibility, and auditability standards.",
+        "Sylen": "Map second-order effects, transferability, and long-tail consequences.",
+    }
+    if member_name in defaults:
+        return defaults[member_name]
+    pillar_defaults = {
+        "Wisdom": "Interrogate assumptions, framing quality, and epistemic uncertainty.",
+        "Strategy": "Test execution paths, tradeoffs, and downside containment.",
+        "Expansion": "Explore adjacent domains, transferability, and growth opportunities.",
+        "Future": "Stress-test downstream effects, path dependence, and long-range risk.",
+        "Integrity": "Audit governance, ethics constraints, and accountability controls.",
+    }
+    return pillar_defaults.get(pillar, "Gather balanced support, counterevidence, and practical implications.")
+
+
+def _build_rare_member_seed_state(selected_members: Dict[str, dict]) -> Dict[str, Dict[str, Any]]:
+    seed: Dict[str, Dict[str, Any]] = {}
+    for name, data in selected_members.items():
+        pillar = data.get("pillar", "Unknown Pillar")
+        behavioral = derive_behavioral_profile(name, data, pillar)
+        aligns = _coerce_str_list(data.get("aligns_with"), max_items=4, max_len=40)
+        conflicts = _coerce_str_list(data.get("conflicts_with"), max_items=4, max_len=40)
+        seed[name] = {
+            "member_name": name,
+            "pillar": pillar,
+            "optimizes_for": behavioral.get("optimizes_for", "N/A"),
+            "distrusts": behavioral.get("distrusts", "N/A"),
+            "blind_spot": behavioral.get("blind_spot", "N/A"),
+            "attack_style": behavioral.get("attack_style", "N/A"),
+            "concession_style": behavioral.get("concession_style", "N/A"),
+            "what_changes_their_mind": behavioral.get("what_changes_their_mind", "N/A"),
+            "failure_mode": behavioral.get("failure_mode", "N/A"),
+            "tone_profile": behavioral.get("tone_profile", "N/A"),
+            "initial_position": "Undeclared.",
+            "current_position": "Undeclared.",
+            "confidence": 60,
+            "has_shifted": False,
+            "allies": aligns,
+            "frictions": conflicts,
+            "evidence_notes": [],
+            "open_questions": [],
+            "speaking_count": 0,
+            "last_spoke_turn": 0,
+            "persuasion_state": "forming",
+            "secretary_focus": _default_secretary_focus(name, pillar),
+            "secretary_invoked": False,
+        }
+    return seed
+
+
+def _build_rare_roster_context(selected_members: Dict[str, dict], chamber_seed: Dict[str, Dict[str, Any]]) -> str:
+    blocks: List[str] = []
+    for name, data in selected_members.items():
+        seed = chamber_seed[name]
+        block = [
+            f"{name} ({data['pillar']})",
+            f"claimed-title: {_clean_line(data.get('claimed-title'))}",
+            f"role: {_clean_line(data.get('role'))}",
+            f"optimizes_for: {_clean_line(seed.get('optimizes_for'))}",
+            f"distrusts: {_clean_line(seed.get('distrusts'))}",
+            f"blind_spot: {_clean_line(seed.get('blind_spot'))}",
+            f"attack_style: {_clean_line(seed.get('attack_style'))}",
+            f"concession_style: {_clean_line(seed.get('concession_style'))}",
+            f"what_changes_their_mind: {_clean_line(seed.get('what_changes_their_mind'))}",
+            f"failure_mode: {_clean_line(seed.get('failure_mode'))}",
+            f"tone_profile: {_clean_line(seed.get('tone_profile'))}",
+            f"aligns_with: {', '.join(seed.get('allies') or ['N/A'])}",
+            f"conflicts_with: {', '.join(seed.get('frictions') or ['N/A'])}",
+            f"secretary_default_focus: {_clean_line(seed.get('secretary_focus'))}",
+        ]
+        blocks.append("\n".join(block))
+    return "\n\n".join(blocks)
+
+
+def _render_rare_deliberation(transcript: List[Dict[str, Any]]) -> str:
+    lines: List[str] = []
+    for turn_idx, entry in enumerate(transcript, start=1):
+        speaker = entry.get("speaker", "Unknown")
+        pillar = entry.get("pillar", MEMBER_TO_PILLAR.get(speaker, "Unknown Pillar"))
+        speech = _clean_line(entry.get("speech"), 420)
+        target = _clean_line(entry.get("target"), 60)
+        markers: List[str] = []
+        if target != "N/A":
+            markers.append(f"challenging {target}")
+        if entry.get("used_secretary"):
+            markers.append("secretary-backed")
+        stance_shift = _clean_line(entry.get("stance_shift"), 30).lower()
+        if stance_shift in {"softened", "shifted", "reversed"}:
+            markers.append(f"stance:{stance_shift}")
+        prefix = f"{speaker} ({pillar}): "
+        if markers:
+            lines.append(prefix + f"[turn {turn_idx}; {'; '.join(markers)}] {speech}")
+        else:
+            lines.append(prefix + f"[turn {turn_idx}] {speech}")
+    return "\n".join(lines)
+
+
+def _format_rare_final_text(chamber_result: Dict[str, Any], pillar: str = "FAIV") -> str:
+    label = "FAIV Consensus" if pillar == "FAIV" else f"{pillar} Council's Consensus"
+    consensus = _clean_line(chamber_result.get("consensus"), 260)
+    confidence = _coerce_int(chamber_result.get("confidence"), 74, min_value=1, max_value=100)
+    core_insight = _clean_line(chamber_result.get("core_insight"), 240)
+    next_steps = _coerce_str_list(chamber_result.get("what_to_do_next"), max_items=4, max_len=170)
+    unresolved = _coerce_str_list(chamber_result.get("unresolved_doubts"), max_items=4, max_len=170)
+    verdict_state = str(chamber_result.get("verdict_state") or "provisional").strip().lower()
+    if verdict_state not in RARE_ALLOWED_VERDICT_STATES:
+        verdict_state = "provisional"
+
+    lines = [
+        f"{label}: {consensus}",
+        f"Confidence Score: {confidence}%",
+        f"Core Insight: {core_insight}",
+        f"What To Do Next: {'; '.join(next_steps) if next_steps else 'No concrete next steps provided.'}",
+        f"Unresolved Doubts: {'; '.join(unresolved) if unresolved else 'No unresolved doubts identified.'}",
+        f"Verdict State: {verdict_state}",
+    ]
+
+    dissent = chamber_result.get("dissent") if isinstance(chamber_result.get("dissent"), dict) else None
+    if dissent:
+        dissenter = _clean_line(dissent.get("member"), 40)
+        if dissenter != "N/A":
+            dissent_confidence = _coerce_int(dissent.get("confidence"), max(25, confidence - 25), min_value=1, max_value=100)
+            dissent_position = _clean_line(dissent.get("position"), 190)
+            dissent_reason = _clean_line(dissent.get("reason"), 220)
+            lines.append(f"Differing Opinion - {dissenter} ({dissent_confidence}%): {dissent_position}")
+            lines.append(f"Reason: {dissent_reason}")
+    return "\n".join(lines)
+
+
+def _normalize_rare_chamber_output(
+    *,
+    raw_payload: Dict[str, Any],
+    chamber_seed: Dict[str, Dict[str, Any]],
+    selected_members: Dict[str, dict],
+) -> Dict[str, Any]:
+    normalized_members = {name: dict(seed) for name, seed in chamber_seed.items()}
+    transcript_items = raw_payload.get("transcript")
+    normalized_transcript: List[Dict[str, Any]] = []
+    if isinstance(transcript_items, list):
+        for idx, item in enumerate(transcript_items, start=1):
+            if not isinstance(item, dict):
+                continue
+            speaker = _coerce_member_name(item.get("speaker"), selected_members)
+            if not speaker:
+                continue
+            target = _coerce_member_name(item.get("target"), selected_members)
+            speech = _clean_line(item.get("speech"), 420)
+            if speech == "N/A":
+                continue
+            used_secretary = bool(item.get("used_secretary"))
+            stance_shift = _clean_line(item.get("stance_shift"), 40).lower()
+            pillar = selected_members[speaker]["pillar"]
+            normalized_transcript.append(
+                {
+                    "speaker": speaker,
+                    "pillar": pillar,
+                    "target": target or None,
+                    "speech": speech,
+                    "used_secretary": used_secretary,
+                    "stance_shift": stance_shift if stance_shift != "n/a" else "no_change",
+                }
+            )
+            member_state = normalized_members[speaker]
+            member_state["speaking_count"] += 1
+            member_state["last_spoke_turn"] = idx
+            member_state["secretary_invoked"] = member_state["secretary_invoked"] or used_secretary
+
+    terminals_items = raw_payload.get("member_terminals")
+    if isinstance(terminals_items, list):
+        for item in terminals_items:
+            if not isinstance(item, dict):
+                continue
+            member = _coerce_member_name(item.get("member"), selected_members)
+            if not member:
+                continue
+            state = normalized_members[member]
+            initial_position = _clean_line(item.get("initial_position"), 190)
+            current_position = _clean_line(item.get("current_position"), 190)
+            if initial_position != "N/A":
+                state["initial_position"] = initial_position
+            if current_position != "N/A":
+                state["current_position"] = current_position
+            state["confidence"] = _coerce_int(item.get("confidence"), state["confidence"])
+            state["has_shifted"] = bool(item.get("has_shifted"))
+            state["allies"] = _coerce_str_list(item.get("allies"), max_items=5, max_len=40) or state["allies"]
+            state["frictions"] = _coerce_str_list(item.get("frictions"), max_items=5, max_len=40) or state["frictions"]
+            state["evidence_notes"] = _coerce_str_list(item.get("evidence_notes"), max_items=8, max_len=180) or state["evidence_notes"]
+            state["open_questions"] = _coerce_str_list(item.get("open_questions"), max_items=6, max_len=180) or state["open_questions"]
+            state["persuasion_state"] = _clean_line(item.get("persuasion_state"), 50).lower()
+            secretary_focus = _clean_line(item.get("secretary_focus"), 160)
+            if secretary_focus != "N/A":
+                state["secretary_focus"] = secretary_focus
+            state["secretary_invoked"] = state["secretary_invoked"] or bool(item.get("secretary_invoked"))
+
+    cross_exam_items = raw_payload.get("cross_examinations")
+    normalized_cross_exams: List[Dict[str, str]] = []
+    if isinstance(cross_exam_items, list):
+        for item in cross_exam_items:
+            if not isinstance(item, dict):
+                continue
+            challenger = _coerce_member_name(item.get("challenger"), selected_members)
+            target = _coerce_member_name(item.get("target"), selected_members)
+            point = _clean_line(item.get("point"), 220)
+            if challenger and target and point != "N/A":
+                normalized_cross_exams.append(
+                    {"challenger": challenger, "target": target, "point": point}
+                )
+            if len(normalized_cross_exams) >= 20:
+                break
+
+    consensus = _clean_line(raw_payload.get("consensus"), 260)
+    if consensus == "N/A":
+        consensus = "The chamber did not reach an actionable consensus."
+    core_insight = _clean_line(raw_payload.get("core_insight"), 240)
+    if core_insight == "N/A":
+        core_insight = "The chamber found mixed signals and advised a staged decision."
+
+    what_to_do_next = _coerce_str_list(raw_payload.get("what_to_do_next"), max_items=5, max_len=170)
+    unresolved_doubts = _coerce_str_list(raw_payload.get("unresolved_doubts"), max_items=5, max_len=170)
+    confidence = _coerce_int(raw_payload.get("confidence"), 74)
+
+    verdict_state = str(raw_payload.get("verdict_state") or "").strip().lower()
+    if verdict_state not in RARE_ALLOWED_VERDICT_STATES:
+        dissent_exists = bool(raw_payload.get("dissent"))
+        if dissent_exists:
+            verdict_state = "majority_with_dissent"
+        else:
+            positions = {
+                _clean_line(state.get("current_position"), 150)
+                for state in normalized_members.values()
+            }
+            verdict_state = "unanimous" if len(positions) <= 1 else "provisional"
+
+    dissent = raw_payload.get("dissent")
+    normalized_dissent = None
+    if isinstance(dissent, dict):
+        dissenter = _coerce_member_name(dissent.get("member"), selected_members)
+        if dissenter:
+            normalized_dissent = {
+                "member": dissenter,
+                "confidence": _coerce_int(dissent.get("confidence"), max(25, confidence - 22)),
+                "position": _clean_line(dissent.get("position"), 200),
+                "reason": _clean_line(dissent.get("reason"), 220),
+            }
+            normalized_members[dissenter]["persuasion_state"] = "dissenting"
+
+    member_terminals = list(normalized_members.values())
+    member_terminals.sort(key=lambda row: row.get("member_name", ""))
+
+    if not normalized_transcript:
+        fallback_transcript: List[Dict[str, Any]] = []
+        for idx, member_state in enumerate(member_terminals, start=1):
+            fallback_transcript.append(
+                {
+                    "speaker": member_state["member_name"],
+                    "pillar": member_state["pillar"],
+                    "target": None,
+                    "speech": member_state.get("current_position") or member_state.get("initial_position") or "Position held.",
+                    "used_secretary": bool(member_state.get("secretary_invoked")),
+                    "stance_shift": "no_change",
+                }
+            )
+            member_state["speaking_count"] = max(1, member_state.get("speaking_count", 0))
+            member_state["last_spoke_turn"] = idx
+        normalized_transcript = fallback_transcript
+
+    return {
+        "verdict_state": verdict_state,
+        "consensus": consensus,
+        "confidence": confidence,
+        "core_insight": core_insight,
+        "what_to_do_next": what_to_do_next,
+        "unresolved_doubts": unresolved_doubts,
+        "dissent": normalized_dissent,
+        "transcript": normalized_transcript,
+        "member_terminals": member_terminals,
+        "cross_examinations": normalized_cross_exams,
+    }
+
+
+def _build_rare_orchestration_prompt_suffix(continuation_context: str = "") -> str:
+    if not continuation_context:
+        return ""
+    return (
+        "\n\nCONTINUATION CONTEXT (this is active chamber history and user interjection):\n"
+        f"{continuation_context}\n"
+        "Respect this continuity. Do not reset to a clean room debate."
+    )
+
+
+def run_rare_chamber_orchestration(
+    *,
+    session_id: str,
+    user_input: str,
+    pillar: str,
+    selected_members: Dict[str, dict],
+    past_context_summary: str,
+    encoded_context: str,
+    model: str,
+    safety_id: str,
+    continuation_context: str = "",
+) -> Tuple[str, str, str, Dict[str, Any]]:
+    if not selected_members:
+        return (
+            "OpenAI API Error: Rare chamber could not convene a council.",
+            "",
+            "",
+            {"mode": MODE_DEEP, "pillar": pillar, "verdict_state": "unresolved"},
+        )
+
+    chamber_seed = _build_rare_member_seed_state(selected_members)
+    roster_context = _build_rare_roster_context(selected_members, chamber_seed)
+    continuation_suffix = _build_rare_orchestration_prompt_suffix(continuation_context)
+
+    phase_a_system = (
+        "You are the FAIV Rare-mode chamber orchestrator. Produce JSON only.\n"
+        "No markdown. No prose outside JSON.\n"
+        "Generate initial member stances and decide which members invoke secretary support."
+    )
+    phase_a_user = (
+        f"SESSION: {session_id}\n"
+        f"PILLAR: {pillar}\n"
+        f"USER INQUIRY: {user_input}\n"
+        f"PAST SNAPSHOT:\n{past_context_summary}\n\n"
+        f"ENCODED CONTEXT:\n{encoded_context}\n\n"
+        f"MEMBERS:\n{roster_context}"
+        f"{continuation_suffix}\n\n"
+        "Return this JSON schema exactly:\n"
+        "{\n"
+        '  "member_openings": [\n'
+        "    {\n"
+        '      "member": "name",\n'
+        '      "initial_position": "one concise stance",\n'
+        '      "confidence": 1-100,\n'
+        '      "real_question": "what they think user is truly asking",\n'
+        '      "suspected_blind_spot": "hidden user blind spot",\n'
+        '      "request_secretary": true/false,\n'
+        '      "secretary_focus": "specific research focus",\n'
+        '      "challenge_targets": ["member names"]\n'
+        "    }\n"
+        "  ],\n"
+        '  "opening_transcript": [\n'
+        '    {"speaker":"name","target":"name or null","speech":"line","used_secretary":false,"stance_shift":"no_change"}\n'
+        "  ]\n"
+        "}\n"
+        "Rules:\n"
+        "- Members can disagree immediately.\n"
+        "- Do not force equal speaking turns.\n"
+        "- Secretary requests should be selective, not universal."
+    )
+
+    phase_a_resp = create_chat_completion(
+        model=model,
+        messages=[
+            {"role": "system", "content": phase_a_system},
+            {"role": "user", "content": phase_a_user},
+        ],
+        max_output_tokens=min(760, get_max_output_tokens(MODE_DEEP)),
+        user=safety_id or session_id,
+        generation={"temperature": 0.35, "top_p": 0.85, "frequency_penalty": 0.2, "presence_penalty": 0.2},
+        mode=MODE_DEEP,
+    )
+    phase_a_raw = phase_a_resp.choices[0].message.content.strip()
+    phase_a_json = _extract_json_payload(phase_a_raw)
+
+    opening_transcript: List[Dict[str, Any]] = []
+    member_openings = phase_a_json.get("member_openings")
+    if isinstance(member_openings, list):
+        for item in member_openings:
+            if not isinstance(item, dict):
+                continue
+            member_name = _coerce_member_name(item.get("member"), selected_members)
+            if not member_name:
+                continue
+            state = chamber_seed[member_name]
+            initial_position = _clean_line(item.get("initial_position"), 200)
+            if initial_position != "N/A":
+                state["initial_position"] = initial_position
+                state["current_position"] = initial_position
+            state["confidence"] = _coerce_int(item.get("confidence"), state["confidence"])
+            state["open_questions"] = _coerce_str_list(
+                [item.get("real_question"), item.get("suspected_blind_spot")],
+                max_items=2,
+                max_len=170,
+            )
+            focus = _clean_line(item.get("secretary_focus"), 170)
+            if focus != "N/A":
+                state["secretary_focus"] = focus
+            state["secretary_invoked"] = bool(item.get("request_secretary"))
+
+    opening_rows = phase_a_json.get("opening_transcript")
+    if isinstance(opening_rows, list):
+        for row in opening_rows:
+            if not isinstance(row, dict):
+                continue
+            speaker = _coerce_member_name(row.get("speaker"), selected_members)
+            if not speaker:
+                continue
+            target = _coerce_member_name(row.get("target"), selected_members)
+            speech = _clean_line(row.get("speech"), 420)
+            if speech == "N/A":
+                continue
+            opening_transcript.append(
+                {
+                    "speaker": speaker,
+                    "pillar": selected_members[speaker]["pillar"],
+                    "target": target or None,
+                    "speech": speech,
+                    "used_secretary": bool(row.get("used_secretary")),
+                    "stance_shift": _clean_line(row.get("stance_shift"), 40).lower(),
+                }
+            )
+            chamber_seed[speaker]["speaking_count"] += 1
+            chamber_seed[speaker]["last_spoke_turn"] = len(opening_transcript)
+
+    if not opening_transcript:
+        for idx, (name, state) in enumerate(chamber_seed.items(), start=1):
+            opening_transcript.append(
+                {
+                    "speaker": name,
+                    "pillar": state["pillar"],
+                    "target": None,
+                    "speech": state["initial_position"],
+                    "used_secretary": False,
+                    "stance_shift": "no_change",
+                }
+            )
+            state["speaking_count"] = 1
+            state["last_spoke_turn"] = idx
+
+    secretary_members = [
+        name for name, state in chamber_seed.items() if state.get("secretary_invoked")
+    ]
+    if not secretary_members:
+        ranked = sorted(chamber_seed.items(), key=lambda row: row[1].get("confidence", 60))
+        secretary_members = [name for name, _ in ranked[: min(2, len(ranked))]]
+        for name in secretary_members:
+            chamber_seed[name]["secretary_invoked"] = True
+
+    secretary_packets: Dict[str, Dict[str, Any]] = {}
+    if secretary_members:
+        secretary_requests = []
+        for member_name in secretary_members:
+            state = chamber_seed[member_name]
+            secretary_requests.append(
+                {
+                    "member": member_name,
+                    "pillar": state["pillar"],
+                    "initial_position": state["initial_position"],
+                    "focus": state["secretary_focus"],
+                    "allies": state["allies"],
+                    "frictions": state["frictions"],
+                    "optimizes_for": state["optimizes_for"],
+                    "distrusts": state["distrusts"],
+                }
+            )
+
+        phase_b_system = (
+            "You are a FAIV chamber secretary service. Produce JSON only.\n"
+            "Provide compact evidence packets per requesting member."
+        )
+        phase_b_user = (
+            f"USER INQUIRY: {user_input}\n"
+            f"PILLAR: {pillar}\n"
+            f"REQUESTS:\n{json.dumps(secretary_requests, ensure_ascii=False, indent=2)}\n"
+            f"{continuation_suffix}\n\n"
+            "Return this schema:\n"
+            "{\n"
+            '  "secretary_packets": [\n'
+            "    {\n"
+            '      "member":"name",\n'
+            '      "focus":"research focus",\n'
+            '      "supporting_evidence":["..."],\n'
+            '      "counter_evidence":["..."],\n'
+            '      "precedents":["..."],\n'
+            '      "risks":["..."],\n'
+            '      "uncertainty_flags":["..."],\n'
+            '      "open_questions":["..."]\n'
+            "    }\n"
+            "  ]\n"
+            "}\n"
+            "Keep items concise and practical."
+        )
+
+        phase_b_resp = create_chat_completion(
+            model=model,
+            messages=[
+                {"role": "system", "content": phase_b_system},
+                {"role": "user", "content": phase_b_user},
+            ],
+            max_output_tokens=min(680, get_max_output_tokens(MODE_DEEP)),
+            user=safety_id or session_id,
+            generation={"temperature": 0.25, "top_p": 0.8, "frequency_penalty": 0.15, "presence_penalty": 0.1},
+            mode=MODE_DEEP,
+        )
+        phase_b_raw = phase_b_resp.choices[0].message.content.strip()
+        phase_b_json = _extract_json_payload(phase_b_raw)
+        packets = phase_b_json.get("secretary_packets")
+        if isinstance(packets, list):
+            for packet in packets:
+                if not isinstance(packet, dict):
+                    continue
+                member_name = _coerce_member_name(packet.get("member"), selected_members)
+                if not member_name:
+                    continue
+                state = chamber_seed[member_name]
+                compiled_notes = []
+                compiled_notes.extend(_coerce_str_list(packet.get("supporting_evidence"), max_items=3))
+                compiled_notes.extend(_coerce_str_list(packet.get("counter_evidence"), max_items=2))
+                compiled_notes.extend(_coerce_str_list(packet.get("precedents"), max_items=2))
+                compiled_notes.extend(_coerce_str_list(packet.get("risks"), max_items=2))
+                state["evidence_notes"] = compiled_notes[:8]
+                open_questions = _coerce_str_list(packet.get("open_questions"), max_items=4)
+                uncertainty_flags = _coerce_str_list(packet.get("uncertainty_flags"), max_items=3)
+                state["open_questions"] = (state["open_questions"] + open_questions + uncertainty_flags)[:6]
+                secretary_packets[member_name] = {
+                    "focus": _clean_line(packet.get("focus"), 170),
+                    "supporting_evidence": _coerce_str_list(packet.get("supporting_evidence"), max_items=4),
+                    "counter_evidence": _coerce_str_list(packet.get("counter_evidence"), max_items=4),
+                    "precedents": _coerce_str_list(packet.get("precedents"), max_items=3),
+                    "risks": _coerce_str_list(packet.get("risks"), max_items=4),
+                    "uncertainty_flags": _coerce_str_list(packet.get("uncertainty_flags"), max_items=4),
+                    "open_questions": _coerce_str_list(packet.get("open_questions"), max_items=4),
+                }
+
+    chamber_prompt_state = {
+        "user_inquiry": user_input,
+        "pillar": pillar,
+        "members": list(chamber_seed.values()),
+        "opening_transcript": opening_transcript,
+        "secretary_packets": secretary_packets,
+    }
+    if continuation_context:
+        chamber_prompt_state["continuation_context"] = continuation_context
+
+    phase_c_system = (
+        "You are the FAIV Rare-mode chamber. Produce JSON only. No markdown.\n"
+        "This is a live deliberation, not a staged script.\n"
+        "Rules:\n"
+        "- Uneven speaking turns are allowed.\n"
+        "- Members challenge by name with evidence pressure.\n"
+        "- Secretary packets support members; they do not replace member voice.\n"
+        "- Stop organically when consensus, majority-with-dissent, or stall is reached.\n"
+        "- Do not emit visible round labels."
+    )
+    phase_c_user = (
+        f"CHAMBER STATE INPUT:\n{json.dumps(chamber_prompt_state, ensure_ascii=False, indent=2)}\n\n"
+        "Return JSON with this schema:\n"
+        "{\n"
+        '  "verdict_state":"unanimous|majority_with_dissent|provisional|stalled_but_leaning|unresolved",\n'
+        '  "consensus":"...",\n'
+        '  "confidence":1-100,\n'
+        '  "core_insight":"...",\n'
+        '  "what_to_do_next":["..."],\n'
+        '  "unresolved_doubts":["..."],\n'
+        '  "dissent":{"member":"name","confidence":1-100,"position":"...","reason":"..."} or null,\n'
+        '  "transcript":[{"speaker":"name","target":"name or null","speech":"...","used_secretary":true/false,"stance_shift":"no_change|softened|shifted|reversed"}],\n'
+        '  "member_terminals":[{"member":"name","initial_position":"...","current_position":"...","confidence":1-100,"has_shifted":true/false,"allies":["..."],"frictions":["..."],"secretary_focus":"...","secretary_invoked":true/false,"evidence_notes":["..."],"open_questions":["..."],"persuasion_state":"holding|softening|shifted|dissenting"}],\n'
+        '  "cross_examinations":[{"challenger":"name","target":"name","point":"..."}]\n'
+        "}\n"
+        "Transcript should show genuine pressure and persuasion, not decorative monologues."
+    )
+
+    phase_c_resp = create_chat_completion(
+        model=model,
+        messages=[
+            {"role": "system", "content": phase_c_system},
+            {"role": "user", "content": phase_c_user},
+        ],
+        max_output_tokens=min(1450, get_max_output_tokens(MODE_DEEP)),
+        user=safety_id or session_id,
+        generation=get_model_settings(MODE_DEEP),
+        mode=MODE_DEEP,
+    )
+    phase_c_raw = phase_c_resp.choices[0].message.content.strip()
+    phase_c_json = _extract_json_payload(phase_c_raw)
+
+    normalized_result = _normalize_rare_chamber_output(
+        raw_payload=phase_c_json,
+        chamber_seed=chamber_seed,
+        selected_members=selected_members,
+    )
+    normalized_result["secretary_packets"] = secretary_packets
+    normalized_result["opening_transcript"] = opening_transcript
+    normalized_result["mode"] = MODE_DEEP
+    normalized_result["pillar"] = pillar
+
+    deliberation_text = _render_rare_deliberation(normalized_result["transcript"])
+    final_text = _format_rare_final_text(normalized_result, pillar)
+    raw_trace = "\n\n".join(
+        [
+            "[RARE-ORCH PHASE-A RAW]",
+            phase_a_raw,
+            "[RARE-ORCH PHASE-C RAW]",
+            phase_c_raw,
+        ]
+    )
+    return final_text, deliberation_text, raw_trace, normalized_result
+
+
 ################################################
 # 4) The Flexible Extraction
 ################################################
@@ -1294,9 +2002,15 @@ def query_openai_faiv(
     model: str = OPENAI_DEFAULT_MODEL,
     safety_id: Optional[str] = None,
 ) -> tuple:
-    """Returns (parsed_final, deliberation_text, raw_response, selected_members) tuple."""
+    """Returns (parsed_final, deliberation_text, raw_response, selected_members, rare_chamber) tuple."""
     if client is None:
-        return ("OpenAI API Error: OPENAI_API_KEY is not set. Please set the environment variable and restart.", "", "", {})
+        return (
+            "OpenAI API Error: OPENAI_API_KEY is not set. Please set the environment variable and restart.",
+            "",
+            "",
+            {},
+            None,
+        )
     try:
         normalized_mode = normalize_mode(mode)
         session_data = session_get(session_id)
@@ -1309,6 +2023,23 @@ def query_openai_faiv(
         encoded_context = encode_faiv_perspectives(perspective_data, pillar=pillar)
 
         selected_members = select_council_representatives(pillar)
+
+        if normalized_mode == MODE_DEEP:
+            try:
+                parsed, deliberation, raw, rare_payload = run_rare_chamber_orchestration(
+                    session_id=session_id,
+                    user_input=user_input,
+                    pillar=pillar,
+                    selected_members=selected_members,
+                    past_context_summary=past_context_summary,
+                    encoded_context=encoded_context,
+                    model=model,
+                    safety_id=safety_id or session_id,
+                )
+                return (parsed, deliberation, raw, selected_members, rare_payload)
+            except Exception as rare_ex:
+                logger.warning("Rare chamber orchestration failed; falling back to legacy deep prompt: %s", rare_ex)
+
         member_profiles = format_member_profiles(selected_members, mode=normalized_mode)
 
         roster_lines = []
@@ -1376,11 +2107,11 @@ def query_openai_faiv(
         deliberation, final_text = split_response_sections(raw)
         deliberation = normalize_deliberation_labels(deliberation, pillar)
         parsed = extract_faiv_final_output(final_text, pillar)
-        return (parsed, deliberation, raw, selected_members)
+        return (parsed, deliberation, raw, selected_members, None)
 
     except Exception as ex:
         logger.error(f"OpenAI API Error: {ex}")
-        return (f"OpenAI API Error: {ex}", "", "", {})
+        return (f"OpenAI API Error: {ex}", "", "", {}, None)
 
 
 ################################################
@@ -1869,7 +2600,7 @@ async def query_faiv_endpoint(payload: QueryRequest, request: Request):
         if not isinstance(past_messages, list):
             past_messages = []
 
-        parsed, deliberation, _raw, selected_members = query_openai_faiv(
+        parsed, deliberation, _raw, selected_members, rare_payload = query_openai_faiv(
             session_id,
             user_input,
             chosen_pillar,
@@ -1889,6 +2620,7 @@ async def query_faiv_endpoint(payload: QueryRequest, request: Request):
                 "session_id": session_id,
                 "deliberation": deliberation if deliberation else None,
                 "council": council,
+                "rare_chamber": rare_payload if chosen_mode == MODE_DEEP else None,
             }
             _idempotency_set(cache_key, response_payload)
             return response_payload
@@ -1904,6 +2636,7 @@ async def query_faiv_endpoint(payload: QueryRequest, request: Request):
                 "session_id": session_id,
                 "deliberation": deliberation if deliberation else None,
                 "council": council,
+                "rare_chamber": rare_payload if chosen_mode == MODE_DEEP else None,
             }
             _idempotency_set(cache_key, response_payload)
             return response_payload
@@ -1925,6 +2658,7 @@ async def query_faiv_endpoint(payload: QueryRequest, request: Request):
             "dissenting_member": chamber_meta.get("dissenting_member"),
             "changed_positions": chamber_meta.get("changed_positions"),
             "deliberation_summary": chamber_meta.get("deliberation_summary"),
+            "rare_chamber": rare_payload if chosen_mode == MODE_DEEP else None,
         })
         session_set(session_id, json.dumps(past_messages, ensure_ascii=False))
 
@@ -1937,6 +2671,7 @@ async def query_faiv_endpoint(payload: QueryRequest, request: Request):
             "deliberation": deliberation if deliberation else None,
             "council": council,
             "chamber": chamber_meta,
+            "rare_chamber": rare_payload if chosen_mode == MODE_DEEP else None,
         }
         _idempotency_set(cache_key, response_payload)
         return response_payload
@@ -1967,13 +2702,52 @@ def query_openai_redeliberate(
     safety_id: Optional[str] = None,
 ) -> tuple:
     """Re-deliberate from a specific point with user interjection.
-    Returns (parsed_final, deliberation_text, raw_response, selected_members) tuple."""
+    Returns (parsed_final, deliberation_text, raw_response, selected_members, rare_chamber) tuple."""
     if client is None:
-        return ("OpenAI API Error: OPENAI_API_KEY is not set.", "", "", {})
+        return ("OpenAI API Error: OPENAI_API_KEY is not set.", "", "", {}, None)
     try:
         normalized_mode = normalize_mode(mode)
         # Reconvene the same council members if provided, otherwise random
         selected_members = select_council_representatives(pillar, specific_names=council_members or None)
+        if not selected_members:
+            selected_members = select_council_representatives(pillar)
+
+        if normalized_mode == MODE_DEEP:
+            try:
+                session_data = session_get(session_id)
+                prior_messages = json.loads(session_data) if session_data else []
+                if not isinstance(prior_messages, list):
+                    prior_messages = []
+                past_context_summary = summarize_past_messages(prior_messages)
+                perspective_data = {
+                    "FAIV Past": past_context_summary,
+                    "User interjection": f"{target_member}: {user_comment}",
+                }
+                encoded_context = encode_faiv_perspectives(perspective_data, pillar=pillar)
+                continuation_context = (
+                    f"Original Inquiry: {original_input}\n"
+                    f"Deliberation so far:\n{deliberation_up_to}\n"
+                    f"User to {target_member}: {user_comment}"
+                )
+                combined_input = (
+                    f"{original_input}\n\n"
+                    f"User re-deliberation to {target_member}: {user_comment}"
+                )
+                parsed, deliberation, raw, rare_payload = run_rare_chamber_orchestration(
+                    session_id=session_id,
+                    user_input=combined_input,
+                    pillar=pillar,
+                    selected_members=selected_members,
+                    past_context_summary=past_context_summary,
+                    encoded_context=encoded_context,
+                    model=model,
+                    safety_id=safety_id or session_id,
+                    continuation_context=continuation_context,
+                )
+                return (parsed, deliberation, raw, selected_members, rare_payload)
+            except Exception as rare_ex:
+                logger.warning("Rare re-deliberation orchestration failed; falling back to legacy prompt: %s", rare_ex)
+
         member_profiles = format_member_profiles(selected_members, mode=normalized_mode)
 
         roster_lines = []
@@ -2029,11 +2803,11 @@ def query_openai_redeliberate(
         deliberation, final_text = split_response_sections(raw)
         deliberation = normalize_deliberation_labels(deliberation, pillar)
         parsed = extract_faiv_final_output(final_text, pillar)
-        return (parsed, deliberation, raw, selected_members)
+        return (parsed, deliberation, raw, selected_members, None)
 
     except Exception as ex:
         logger.error(f"OpenAI API Error (redeliberate): {ex}")
-        return (f"OpenAI API Error: {ex}", "", "", {})
+        return (f"OpenAI API Error: {ex}", "", "", {}, None)
 
 
 @fastapi_app.post("/redeliberate/")
@@ -2075,7 +2849,7 @@ async def redeliberate_endpoint(payload: RedeliberateRequest, request: Request):
                 content={"error": "Blocked. This content violates safety rules."},
             )
 
-        parsed, deliberation, _raw, selected_members = query_openai_redeliberate(
+        parsed, deliberation, _raw, selected_members, rare_payload = query_openai_redeliberate(
             session_id=session_id,
             original_input=payload.original_input,
             deliberation_up_to=payload.deliberation_up_to,
@@ -2099,6 +2873,7 @@ async def redeliberate_endpoint(payload: RedeliberateRequest, request: Request):
                 "session_id": session_id,
                 "deliberation": deliberation if deliberation else None,
                 "council": council,
+                "rare_chamber": rare_payload if chosen_mode == MODE_DEEP else None,
             }
             _idempotency_set(cache_key, response_payload)
             return response_payload
@@ -2112,6 +2887,7 @@ async def redeliberate_endpoint(payload: RedeliberateRequest, request: Request):
                 "session_id": session_id,
                 "deliberation": deliberation if deliberation else None,
                 "council": council,
+                "rare_chamber": rare_payload if chosen_mode == MODE_DEEP else None,
             }
             _idempotency_set(cache_key, response_payload)
             return response_payload
@@ -2134,6 +2910,7 @@ async def redeliberate_endpoint(payload: RedeliberateRequest, request: Request):
             "dissenting_member": chamber_meta.get("dissenting_member"),
             "changed_positions": chamber_meta.get("changed_positions"),
             "deliberation_summary": chamber_meta.get("deliberation_summary"),
+            "rare_chamber": rare_payload if chosen_mode == MODE_DEEP else None,
         })
         session_set(session_id, json.dumps(past_messages, ensure_ascii=False))
 
@@ -2146,6 +2923,7 @@ async def redeliberate_endpoint(payload: RedeliberateRequest, request: Request):
             "deliberation": deliberation if deliberation else None,
             "council": council,
             "chamber": chamber_meta,
+            "rare_chamber": rare_payload if chosen_mode == MODE_DEEP else None,
         }
         _idempotency_set(cache_key, response_payload)
         return response_payload
